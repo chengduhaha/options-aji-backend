@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+*.pyc
+__pycache__/
+.venv/
+data/*.db
+data/*.db-journal

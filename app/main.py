@@ -12,8 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.agent import router as agent_router
 from app.api.routes.compat import router as compat_router
+from app.api.routes.discord_backfill import router as discord_backfill_router
 from app.api.routes.events import router as events_router
 from app.api.routes.health import router as health_router
+from app.api.routes.integration_status import router as integration_router
+from app.api.routes.signals_feed import router as signals_feed_router
 from app.api.routes.messages import router as messages_router
 from app.config import get_settings
 from app.db.bootstrap import init_db
@@ -74,6 +77,9 @@ def create_application() -> FastAPI:
     app.include_router(compat_router)
     app.include_router(agent_router)
     app.include_router(messages_router)
+    app.include_router(integration_router)
+    app.include_router(signals_feed_router)
+    app.include_router(discord_backfill_router)
     app.include_router(events_router)
 
     return app

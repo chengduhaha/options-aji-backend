@@ -79,16 +79,24 @@ def list_messages_recent(
     limit: int,
 ) -> list[StoredDiscordMessage]:
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
+    # Ticker filtering happens client-side below; widen scan so sparse matches still appear.
+    fetch_cap = (
+        limit
+        if ticker is None
+        else min(500, max(80, limit * 40))
+    )
     stmt: Select[tuple[DiscordMessageRow]] = (
         select(DiscordMessageRow)
         .where(DiscordMessageRow.timestamp >= since)
         .order_by(DiscordMessageRow.timestamp.desc())
-        .limit(max(1, min(limit, 200)))
+        .limit(max(1, min(fetch_cap, 2000)))
     )
     rows = list(session.scalars(stmt).all())
     if ticker:
         ticker_u = ticker.strip().upper()
         rows = [r for r in rows if ticker_u in list(r.tickers or [])]
+
+    trimmed = rows[: max(1, min(limit, 500))]
 
     return [
         StoredDiscordMessage(
@@ -99,7 +107,7 @@ def list_messages_recent(
             timestamp_utc_iso=r.timestamp.astimezone(dt.timezone.utc).isoformat(),
             tickers=list(r.tickers or []),
         )
-        for r in rows
+        for r in trimmed
     ]
 
 

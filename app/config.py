@@ -33,6 +33,13 @@ class Settings(BaseSettings):
 
     retention_days: int = 3
 
+    agent_discord_context_hours: int = 72
+    agent_discord_context_limit: int = 18
+
+    integration_status_public: bool = True
+
+    admin_backfill_token: str = ""
+
     cors_origins: str = "*"
 
 

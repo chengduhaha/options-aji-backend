@@ -1,18 +1,19 @@
-"""LangGraph user Q&A workflow (Phase 1: parse via regex + bundled market snapshot)."""
+"""LangGraph user Q&A workflow (Phase 2-lite: Discord 存档 + yfinance bundle)."""
 
 from __future__ import annotations
 
 import logging
-
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from app.agents.user_agent_helpers import (
+    format_discord_digest,
+    infer_message_filter_symbol,
+)
 from app.config import get_settings
-from app.ingest.tickers import extract_tickers
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -24,33 +25,45 @@ class UserAgentState(TypedDict, total=False):
     question: str
     ticker_hint: str
     resolved_ticker: str
+    discord_context: str
     market_bundle: str
     answer: str
 
 
-def _fetch_market_data(state: UserAgentState) -> dict[str, str]:
+def gather_discord_snapshot(state: UserAgentState) -> dict[str, str]:
+    cfg = get_settings()
+
+    qs = state.get("question", "").strip()
+
+    spotlight, filt = infer_message_filter_symbol(
+        question=qs,
+        ticker_hint=state.get("ticker_hint") or "",
+    )
+
+    blob, qty = format_discord_digest(filter_sym=filt, cfg=cfg)
+
+    suffix = ""
+    if qty > 0:
+        suffix = f"\n（共载入 {qty} 条存档）"
+
+    return {
+        "resolved_ticker": spotlight,
+        "discord_context": blob + suffix,
+    }
+
+
+def fetch_market_bundle(state: UserAgentState) -> dict[str, str]:
     guard_q = state.get("question", "").strip()
     if not guard_q:
-        return {
-            "resolved_ticker": "SPY",
-            "market_bundle": "{}",
-        }
+        return {"market_bundle": "{}"}
 
-    ticker = ""
-    hint = state.get("ticker_hint") or ""
-    if hint.strip():
-        ticker = hint.strip().upper()
-
-    if not ticker:
-        found = extract_tickers(guard_q)
-        ticker = found[0] if found else "SPY"
-
+    ticker = state.get("resolved_ticker") or "SPY"
     toolkit = build_default_toolkit()
     bundle = toolkit.snapshot_bundle(ticker)
-    return {"resolved_ticker": ticker, "market_bundle": bundle}
+    return {"market_bundle": bundle}
 
 
-def _synthesize(state: UserAgentState) -> dict[str, str]:
+def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
     cfg = get_settings()
     api_key = cfg.openrouter_api_key.strip()
     if not api_key:
@@ -67,7 +80,7 @@ def _synthesize(state: UserAgentState) -> dict[str, str]:
 
     system = (
         "你是美股期权与市场结构分析师 OptionsAji。必须用中文作答，简明、可执行。\n"
-        "只依据用户问题与给定 JSON 结构化数据推演；若无数据则说明缺口，不自造行情。\n"
+        "综合参考「Discord存档摘要」（若标明无数据则说明缺口）与市场 JSON 数据结构；不自造成交价。\n"
         "风险提示：教育是目的，不构成投资建议。"
     )
 
@@ -75,7 +88,8 @@ def _synthesize(state: UserAgentState) -> dict[str, str]:
         content=(
             f"用户提问：{state.get('question', '')}\n"
             f"主要标的代码：{state.get('resolved_ticker', '')}\n"
-            f"市场数据结构：\n{state.get('market_bundle', '{}')}"
+            f"Discord存档：\n{state.get('discord_context', '').strip()}\n"
+            f"市场行情 JSON：\n{state.get('market_bundle', '{}')}"
         ),
     )
 
@@ -89,41 +103,43 @@ def _synthesize(state: UserAgentState) -> dict[str, str]:
         return {"answer": f"调用语言模型失败，请稍后重试。详情：{type(exc).__name__}"}
 
 
-_built_graph = None
-
-
-def build_user_agent_graph():
-    """Return compiled graph singleton."""
-    global _built_graph  # noqa: PLW0603
-    if _built_graph is not None:
-        return _built_graph
-
-    sg = StateGraph(UserAgentState)
-    sg.add_node("fetch_market_data", _fetch_market_data)
-    sg.add_node("synthesize", _synthesize)
-    sg.add_edge(START, "fetch_market_data")
-    sg.add_edge("fetch_market_data", "synthesize")
-    sg.add_edge("synthesize", END)
-
-    compiled = sg.compile()
-    _built_graph = compiled
-    return compiled
-
-
-def run_user_agent_once(*, question: str, ticker: Optional[str]) -> UserAgentState:
-    """Execute full graph synchronously (FastAPI SSE worker thread)."""
+def build_initial_agent_state(*, question: str, ticker: Optional[str]) -> UserAgentState:
+    """Warm state before running pipeline phases (SSE + sync invoke reuse)."""
 
     guard = question.strip()
+    ticker_hint = (ticker or "").strip()
+    return {
+        "question": guard,
+        "ticker_hint": ticker_hint,
+    }
+
+
+def execute_user_agent_pipeline(initial: UserAgentState) -> UserAgentState:
+    """Run Discord → market → synthesize sequentially (deterministic replay)."""
+
+    guard = initial.get("question", "").strip()
     if not guard:
         return {
+            **initial,
             "question": "",
             "answer": "问题不能为空。",
-            "resolved_ticker": "SPY",
+            "resolved_ticker": initial.get("ticker_hint", "") or "SPY",
+            "discord_context": "",
             "market_bundle": "{}",
         }
 
-    graph = build_user_agent_graph()
-    merged: UserAgentState = graph.invoke(  # type: ignore[arg-type]
-        {"question": guard, "ticker_hint": (ticker or "").strip()},
-    )
-    return merged
+    state: UserAgentState = {
+        **initial,
+        "question": guard,
+    }
+    state.update(gather_discord_snapshot(state))
+    state.update(fetch_market_bundle(state))
+    state.update(synthesize_llm_answer(state))
+    return state
+
+
+def run_user_agent_once(*, question: str, ticker: Optional[str]) -> UserAgentState:
+    """Execute workflow synchronously (FastAPI SSE worker thread / tests)."""
+
+    initial = build_initial_agent_state(question=question, ticker=ticker)
+    return execute_user_agent_pipeline(initial)

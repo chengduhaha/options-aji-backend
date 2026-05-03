@@ -44,7 +44,7 @@ def _to_payload(row: StoredDiscordMessage) -> DiscordMessagePayload:
 def list_recent_messages(
     ticker: Optional[str] = Query(default=None),
     hours: int = Query(default=24, ge=1, le=24 * 21),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=250),
     session: Session = Depends(db_session_dep),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> MessagesEnvelope:
