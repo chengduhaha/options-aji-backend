@@ -1,0 +1,95 @@
+"""Application entry."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes.agent import router as agent_router
+from app.api.routes.compat import router as compat_router
+from app.api.routes.events import router as events_router
+from app.api.routes.health import router as health_router
+from app.api.routes.messages import router as messages_router
+from app.config import get_settings
+from app.db.bootstrap import init_db
+from app.ingest.discord_bot import parse_channel_ids, run_discord_ingest_forever
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("optionsaji.main")
+
+
+def _startup_discord_listener() -> None:
+    cfg = get_settings()
+
+    channels = parse_channel_ids(cfg.discord_channel_ids)
+
+    ready = cfg.enable_discord_listener and cfg.discord_bot_token.strip() and bool(channels)
+    if not ready:
+        return
+
+    asyncio.create_task(run_discord_ingest_forever())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    Path("./data").mkdir(parents=True, exist_ok=True)
+    init_db()
+    _startup_discord_listener()
+
+    yield
+
+
+def create_application() -> FastAPI:
+    settings = get_settings()
+    origins = ["*"]
+
+    cors_raw = settings.cors_origins.strip()
+    if cors_raw and cors_raw != "*":
+        origins = [o.strip() for o in cors_raw.split(",") if o.strip()] or origins
+
+    app = FastAPI(
+        title=settings.app_name,
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(health_router)
+    app.include_router(compat_router)
+    app.include_router(agent_router)
+    app.include_router(messages_router)
+    app.include_router(events_router)
+
+    return app
+
+
+app = create_application()
+
+
+if __name__ == "__main__":
+    import os
+
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8787")),
+        reload=False,
+    )
