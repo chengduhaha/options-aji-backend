@@ -18,6 +18,9 @@ dependencies = [
   "yfinance>=0.2.40",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]

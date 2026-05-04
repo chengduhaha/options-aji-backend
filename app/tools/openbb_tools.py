@@ -16,6 +16,8 @@ from typing import Optional, cast
 import httpx
 import yfinance as yf
 
+from app.analytics.gex_compute import compute_gex_profile
+from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,21 @@ class OpenBBToolkit:
         except Exception as exc:
             logger.warning("frontend_market_bar extras(%s): %s", guard, exc)
 
+        iv_pctile: Optional[float] = None
+        iv_note = "iv_rank_placeholder"
+        try:
+            hv_series, _hv_meta = hv_series_and_current(guard)
+            hv_vals = [v for _, v in hv_series]
+            rank_est, pct_est, iv_note = iv_rank_percentile_proxy(
+                current_iv_pct=float(atm_iv),
+                hv_series_pct=hv_vals,
+            )
+            if rank_est is not None:
+                iv_rank = int(round(rank_est))
+            iv_pctile = pct_est
+        except Exception as exc:
+            logger.warning("frontend_market_bar iv_rank(%s): %s", guard, exc)
+
         ts = dt.datetime.now(dt.timezone.utc).isoformat()
 
         result: dict[str, object] = {
@@ -118,6 +135,8 @@ class OpenBBToolkit:
             "changePct": round(chg_pct, 4),
             "atmIv": round(atm_iv, 4),
             "ivRank": iv_rank,
+            "ivPercentile": iv_pctile,
+            "ivMethodology": iv_note,
             "pcr": round(pcr, 4),
             "timestamp": ts,
         }
@@ -128,7 +147,7 @@ class OpenBBToolkit:
 
         return result
 
-    def get_option_chain(self, symbol: str) -> dict[str, object]:
+    def get_option_chain(self, symbol: str, *, expiration: Optional[str] = None, head: int = 40) -> dict[str, object]:
         guard = symbol.strip().upper()
         if not guard:
             return {"error": "empty_symbol"}
@@ -140,7 +159,7 @@ class OpenBBToolkit:
             logger.warning("get_option_chain(%s): %s", guard, exc)
             return {"symbol": guard, "error": "chain_meta_failed"}
 
-        expiry = opts[0] if opts else None
+        expiry = expiration or (opts[0] if opts else None)
         if not expiry:
             return {"symbol": guard, "error": "no_option_chain"}
 
@@ -149,52 +168,107 @@ class OpenBBToolkit:
         except Exception as exc:
             logger.warning("get_option_chain chain(%s): %s", guard, exc)
             return {"symbol": guard, "error": "chain_fetch_failed"}
-        calls_records = chain.calls.head(40).fillna("").to_dict("records")
-        puts_records = chain.puts.head(40).fillna("").to_dict("records")
+        calls_df = chain.calls
+        puts_df = chain.puts
+        calls_view = calls_df if head <= 0 else calls_df.head(head)
+        puts_view = puts_df if head <= 0 else puts_df.head(head)
+        calls_records = calls_view.fillna("").to_dict("records")
+        puts_records = puts_view.fillna("").to_dict("records")
 
-        calls_json = [_json_safe_row(r) for r in calls_records]
-        puts_json = [_json_safe_row(r) for r in puts_records]
+        calls_json = [_json_safe_row(cast(dict[str, object], r)) for r in calls_records]
+        puts_json = [_json_safe_row(cast(dict[str, object], r)) for r in puts_records]
 
         return {
             "symbol": guard,
             "expiry": str(expiry),
+            "expirations": [str(x) for x in opts],
             "calls_trimmed": calls_json,
             "puts_trimmed": puts_json,
-            "note": "Chains trimmed to ATM neighborhood head to limit token payload.",
+            "note": "Agent digest may use trimmed head; UI should call /api/stock/{sym}/chain?full=1.",
+        }
+
+    def get_option_chain_full(self, symbol: str, *, expiration: Optional[str] = None) -> dict[str, object]:
+        guard = symbol.strip().upper()
+        if not guard:
+            return {"error": "empty_symbol"}
+
+        try:
+            ticker = yf.Ticker(guard)
+            opts = list(ticker.options or [])
+        except Exception as exc:
+            logger.warning("get_option_chain_full(%s): %s", guard, exc)
+            return {"symbol": guard, "error": "chain_meta_failed"}
+
+        expiry = expiration or (opts[0] if opts else None)
+        if not expiry:
+            return {"symbol": guard, "error": "no_option_chain"}
+
+        try:
+            chain = ticker.option_chain(expiry)
+        except Exception as exc:
+            logger.warning("get_option_chain_full chain(%s): %s", guard, exc)
+            return {"symbol": guard, "error": "chain_fetch_failed"}
+
+        calls_records = chain.calls.fillna("").to_dict("records")
+        puts_records = chain.puts.fillna("").to_dict("records")
+        calls_json = [_json_safe_row(cast(dict[str, object], r)) for r in calls_records]
+        puts_json = [_json_safe_row(cast(dict[str, object], r)) for r in puts_records]
+
+        spot = 0.0
+        try:
+            lp = ticker.fast_info.get("last_price")
+            if isinstance(lp, (int, float)) and not (isinstance(lp, float) and math.isnan(lp)):
+                spot = float(lp)
+        except Exception:
+            pass
+
+        return {
+            "symbol": guard,
+            "expiration": str(expiry),
+            "expirations": [str(x) for x in opts],
+            "underlyingPrice": round(spot, 4) if spot > 0 else None,
+            "calls": calls_json,
+            "puts": puts_json,
         }
 
     def get_gex(self, symbol: str) -> dict[str, object]:
         guard = symbol.strip().upper()
         settings = get_settings()
         base = settings.gex_backend_url.strip()
-        if not base:
+        if base:
+            url = base.rstrip("/") + f"/gex/{guard}"
+            hdrs_raw = settings.gex_backend_headers.strip()
+            headers: dict[str, str] = {}
+            if hdrs_raw:
+                try:
+                    loaded = cast(dict[str, object], json.loads(hdrs_raw))
+                    for k, v in loaded.items():
+                        headers[str(k)] = str(v)
+                except json.JSONDecodeError:
+                    logger.warning("gex_backend_headers invalid JSON")
+
+            try:
+                with httpx.Client(timeout=20.0) as client:
+                    resp = client.get(url, headers=headers)
+                    resp.raise_for_status()
+                    payload = resp.json()
+                if isinstance(payload, dict):
+                    merged = dict(payload)
+                    merged.setdefault("symbol", guard)
+                    return merged
+                return {"symbol": guard, "raw": payload, "source": "gex_upstream"}
+            except httpx.HTTPError as exc:
+                logger.warning("get_gex upstream failed, falling back to local: %s", exc)
+
+        local = compute_gex_profile(guard)
+        if local.get("error"):
             return {
                 "symbol": guard,
                 "available": False,
-                "hint": "Set GEX_BACKEND_URL + optional headers to reuse OptionsAji GEX service.",
+                "error": local.get("error"),
+                "hint": "Upstream GEX unavailable and local chain failed.",
             }
-        url = base.rstrip("/") + f"/gex/{guard}"
-        hdrs_raw = settings.gex_backend_headers.strip()
-        headers: dict[str, str] = {}
-        if hdrs_raw:
-            try:
-                loaded = cast(dict[str, object], json.loads(hdrs_raw))
-                for k, v in loaded.items():
-                    headers[str(k)] = str(v)
-            except json.JSONDecodeError:
-                logger.warning("gex_backend_headers invalid JSON")
-
-        try:
-            with httpx.Client(timeout=20.0) as client:
-                resp = client.get(url, headers=headers)
-                resp.raise_for_status()
-                payload = resp.json()
-            if isinstance(payload, dict):
-                return {"symbol": guard, "available": True, **payload}
-            return {"symbol": guard, "raw": payload}
-        except httpx.HTTPError as exc:
-            logger.warning("get_gex http error: %s", exc)
-            return {"symbol": guard, "error": "upstream_http"}
+        return local
 
     def snapshot_bundle(self, symbol: str) -> str:
         merged = {

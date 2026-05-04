@@ -45,7 +45,7 @@ def toolkit_to_langchain_tools(
     gex_tool = StructuredTool.from_function(
         name="openbb_gamma_exposure",
         description=(
-            "Optional net GEX / walls when GEX_BACKEND_URL points at the OptionsAji service."
+            "Net GEX / walls：优先 GEX_BACKEND_URL；否则本地 yfinance 估计。"
         ),
         args_schema=SymbolArgs,
         func=lambda symbol: _dump(service.get_gex(symbol)),

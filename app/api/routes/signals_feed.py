@@ -102,7 +102,9 @@ def _build_equity_cards(tk: OpenBBToolkit, ticker: str) -> list[SignalCard]:
     if pct_float is not None:
         pct_s = f"，较前收约 {pct_float:+.2f}%"
 
-    gex_avail = isinstance(gex, dict) and gex.get("available") is True
+    gex_avail = isinstance(gex, dict) and (
+        gex.get("available") is True or "netGex" in gex
+    )
     card_type: SignalKind = cast(SignalKind, "gex" if gex_avail else "strategy")
 
     gex_lines = ""
@@ -117,7 +119,7 @@ def _build_equity_cards(tk: OpenBBToolkit, ticker: str) -> list[SignalCard]:
         gex_lines = "\n" + ("\n".join(clipped) if clipped else "  （上游未返回可读字段）")
     elif isinstance(gex, dict) and isinstance(gex.get("hint"), str):
         hint = str(gex.get("hint"))
-        gex_lines = f"\n提示：{hint}（配置 GEX_BACKEND_URL 后可显示 Net GEX 细节）。"
+        gex_lines = f"\n提示：{hint}（默认已启用本地 GEX 估计；可选配置 GEX_BACKEND_URL 覆盖上游）。"
     else:
         gex_lines = "\nGEX：未配置远端或未返回结构化数据（当前以现价 / 期权链摘要为主）。"
 

@@ -1,0 +1,313 @@
+"""Dashboard aggregate endpoints."""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import time
+from typing import Optional
+
+import httpx
+import yfinance as yf
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+
+from app.analytics.iv_metrics import vix_term_structure_hint
+from app.analytics.market_hours import get_us_market_session
+from app.api.deps import bearer_subscription_optional
+from app.config import get_settings
+from app.tools.openbb_tools import OpenBBToolkit, build_default_toolkit
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/market", tags=["market"])
+
+WATCHLIST_MOVER = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA", "MSFT", "META", "AMZN"]
+PULSE = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
+
+_ai_summary_cache: dict[str, Any] = {"ts_monotonic": 0.0, "text": "", "model": ""}
+
+
+class AiSummaryResponse(BaseModel):
+    text: str
+    generated_at_utc: str
+    model: str
+    cached: bool = False
+
+
+@router.get("/overview")
+def market_overview(
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> dict[str, object]:
+    """Single payload for OptionsAji home dashboard."""
+
+    toolkit = build_default_toolkit()
+    session, session_label = get_us_market_session()
+
+    pulse_out: list[dict[str, object]] = []
+    for sym in PULSE:
+        qt = toolkit.get_quote(sym)
+        sym_ui = "VIX" if sym == "^VIX" else sym
+        invert = sym == "^VIX"
+        last = qt.get("last_price")
+        pct = qt.get("change_pct")
+        pulse_out.append(
+            {
+                "symbol": sym_ui,
+                "yahooSymbol": sym,
+                "price": last,
+                "changePct": pct,
+                "invertColors": invert,
+                "error": qt.get("error"),
+            }
+        )
+
+    # VIX mini series (5 sessions)
+    vix_series: list[float] = []
+    vix_last: Optional[float] = None
+    vix_chg: Optional[float] = None
+    try:
+        v = yf.Ticker("^VIX")
+        h = v.history(period="7d", interval="1d")
+        if h is not None and not h.empty and "Close" in h.columns:
+            vix_series = [float(x) for x in h["Close"].dropna().tolist()[-5:]]
+        qi = v.fast_info
+        lp = qi.get("last_price")
+        pc = qi.get("previous_close")
+        if isinstance(lp, (int, float)):
+            vix_last = float(lp)
+        if (
+            isinstance(lp, (int, float))
+            and isinstance(pc, (int, float))
+            and pc
+            and not (isinstance(lp, float) and math.isnan(lp))
+        ):
+            vix_chg = float((float(lp) - float(pc)) / float(pc) * 100.0)
+    except Exception as exc:
+        logger.warning("vix mini series: %s", exc)
+
+    band = "未知"
+    if vix_last is not None:
+        if vix_last < 15:
+            band = "低波动(<15)"
+        elif vix_last < 20:
+            band = "正常(15-20)"
+        elif vix_last < 30:
+            band = "高波动(20-30)"
+        else:
+            band = "极端(>=30)"
+
+    term = vix_term_structure_hint()
+
+    pcrs: list[float] = []
+    for sym in WATCHLIST_MOVER:
+        bar = toolkit.frontend_market_bar(sym)
+        p = bar.get("pcr")
+        if isinstance(p, (int, float)):
+            pcrs.append(float(p))
+    pcr_mean = sum(pcrs) / len(pcrs) if pcrs else None
+
+    unusual = _scan_unusual_top(toolkit, limit=5)
+    earnings = _upcoming_earnings(watchlist=WATCHLIST_MOVER, days_ahead=14)
+
+    gex_quick: list[dict[str, object]] = []
+    for sym in ("SPY", "QQQ"):
+        g = toolkit.get_gex(sym)
+        if isinstance(g, dict) and "netGex" in g:
+            gex_quick.append(
+                {
+                    "symbol": sym,
+                    "netGex": g.get("netGex"),
+                    "gammaFlip": g.get("gammaFlip"),
+                    "regime": g.get("regime"),
+                }
+            )
+
+    import datetime as dt
+
+    return {
+        "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "marketSession": session,
+        "marketSessionLabel": session_label,
+        "pulse": pulse_out,
+        "volatility": {
+            "vix": vix_last,
+            "vixChangePct": vix_chg,
+            "band": band,
+            "vixSeries": vix_series,
+            "termStructure": term,
+        },
+        "liquidity": {
+            "putCallRatioVolumeApprox": pcr_mean,
+            "methodology": "Watchlist volume P/C mean from yfinance front expiry; not CBOE aggregate.",
+            "symbolsSampled": WATCHLIST_MOVER,
+        },
+        "unusual": unusual,
+        "earnings": earnings,
+        "gexQuick": gex_quick,
+        "watchlist": WATCHLIST_MOVER,
+    }
+
+
+def _scan_unusual_top(toolkit: OpenBBToolkit, *, limit: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for sym in WATCHLIST_MOVER:
+        ch = toolkit.get_option_chain_full(sym)
+        if not isinstance(ch, dict) or ch.get("error"):
+            continue
+        exp = str(ch.get("expiration") or "")
+        for side, key in (("call", "calls"), ("put", "puts")):
+            arr = ch.get(key) or []
+            if not isinstance(arr, list):
+                continue
+            for rec in arr:
+                if not isinstance(rec, dict):
+                    continue
+                vol = float(rec.get("volume") or 0)
+                oi = float(rec.get("openInterest") or 0)
+                strike = rec.get("strike")
+                if vol < 50 or oi < 1:
+                    continue
+                ratio = vol / max(oi, 1.0)
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "type": side,
+                        "strike": strike,
+                        "expiration": exp,
+                        "volume": vol,
+                        "openInterest": oi,
+                        "volOiRatio": round(ratio, 3),
+                        "iv": rec.get("impliedVolatility"),
+                    }
+                )
+    rows.sort(key=lambda r: float(r.get("volOiRatio") or 0), reverse=True)
+    top = rows[:limit]
+    for r in top:
+        t = str(r.get("type") or "")
+        r["sentiment"] = "Bullish" if t == "call" else "Bearish"
+    return top
+
+
+def _upcoming_earnings(*, watchlist: list[str], days_ahead: int) -> list[dict[str, object]]:
+    import datetime as dt
+
+    out: list[dict[str, object]] = []
+    today = dt.datetime.now(dt.timezone.utc).date()
+    horizon = today + dt.timedelta(days=days_ahead)
+    for sym in watchlist:
+        try:
+            t = yf.Ticker(sym)
+            cal = getattr(t, "calendar", None)
+            df = cal if cal is not None and hasattr(cal, "empty") else None
+            ed = None
+            if df is not None and not getattr(df, "empty", True) and "Earnings Date" in df.index:
+                cell = df.loc["Earnings Date"]
+                ts = getattr(cell, "iloc", lambda *_: cell)(0)
+                if hasattr(ts, "date"):
+                    ed = ts.date()
+                elif isinstance(ts, dt.datetime):
+                    ed = ts.date()
+            if ed is None:
+                eds = getattr(t, "earnings_dates", None)
+                if eds is not None and hasattr(eds, "index") and len(getattr(eds, "index", [])) > 0:
+                    idx = list(eds.index)
+                    if idx:
+                        ts0 = idx[0]
+                        ed = ts0.date() if hasattr(ts0, "date") else None
+            if ed is None:
+                continue
+            if today <= ed <= horizon:
+                out.append(
+                    {
+                        "symbol": sym,
+                        "date": ed.isoformat(),
+                        "note": "EPS / expected move需后续接入完整财报端点。",
+                    }
+                )
+        except Exception as exc:
+            logger.debug("earnings %s: %s", sym, exc)
+            continue
+    out.sort(key=lambda x: str(x.get("date")))
+    return out[:12]
+
+
+@router.get("/ai-summary", response_model=AiSummaryResponse)
+def market_ai_summary(
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> AiSummaryResponse:
+    cfg = get_settings()
+    import datetime as dt
+
+    now = time.monotonic()
+    if _ai_summary_cache["text"] and now - float(_ai_summary_cache["ts_monotonic"]) < 3600:
+        return AiSummaryResponse(
+            text=str(_ai_summary_cache["text"]),
+            generated_at_utc=str(_ai_summary_cache.get("generated_at_utc") or ""),
+            model=str(_ai_summary_cache.get("model") or ""),
+            cached=True,
+        )
+
+    api_key = cfg.openrouter_api_key.strip()
+    if not api_key:
+        payload = AiSummaryResponse(
+            text="未配置 OPENROUTER_API_KEY，暂无法生成 AI 摘要。",
+            generated_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+            model="",
+            cached=False,
+        )
+        return payload
+
+    overview = market_overview(_)
+    payload = json.dumps(overview, ensure_ascii=False, default=str)
+    prompt = (
+        "你是 OptionsAji 市场编辑。请用中文输出 2-3 句话，概括当前指数强弱、波动率环境与 1-2 个简单风险点。"
+        f"输入 JSON（可能较长，请抓重点）：{payload[:28000]}"
+    )
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(
+                f"{cfg.openrouter_base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": cfg.model_synthesis,
+                    "messages": [
+                        {"role": "system", "content": "仅输出紧凑中文短文，无 Markdown 标题。"},
+                        {"role": "user", "content": prompt[:28000]},
+                    ],
+                    "temperature": 0.35,
+                },
+            )
+            resp.raise_for_status()
+            data: dict[str, object] = resp.json()
+            choices = data.get("choices")
+            text = ""
+            if isinstance(choices, list) and choices:
+                msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                    text = str(msg["content"])
+            if not text.strip():
+                text = "模型未返回可用文本。"
+    except Exception as exc:
+        logger.warning("ai summary fail: %s", exc)
+        text = f"AI 摘要生成失败：{type(exc).__name__}"
+
+    gen_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    _ai_summary_cache.update(
+        {
+            "ts_monotonic": now,
+            "text": text,
+            "model": cfg.model_synthesis,
+            "generated_at_utc": gen_at,
+        }
+    )
+    return AiSummaryResponse(
+        text=text,
+        generated_at_utc=gen_at,
+        model=cfg.model_synthesis,
+        cached=False,
+    )
