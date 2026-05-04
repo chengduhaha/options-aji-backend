@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.analytics.cboe_equity_pc import fetch_equity_pc_latest
+from app.analytics.iv_metrics import vix_term_structure_hint
 from app.analytics.market_hours import get_us_market_session
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
