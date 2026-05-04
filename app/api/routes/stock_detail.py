@@ -10,8 +10,10 @@ from typing import Any, Optional
 import yfinance as yf
 from fastapi import APIRouter, Depends, Query
 
+from app.analytics.earnings_depth import build_earnings_history
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
 from app.api.deps import bearer_subscription_optional
+from app.config import get_settings
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -342,8 +344,10 @@ def stock_strategy_ideas(
 def stock_earnings(
     symbol: str,
     _: Optional[str] = Depends(bearer_subscription_optional),
+    limit: int = Query(default=8, ge=1, le=24),
 ) -> dict[str, object]:
     sym = symbol.strip().upper()
+    cfg = get_settings()
     next_dt = None
     try:
         t = yf.Ticker(sym)
@@ -353,9 +357,39 @@ def stock_earnings(
             next_dt = ts0.date().isoformat() if hasattr(ts0, "date") else str(ts0)
     except Exception:
         pass
+
+    history_tuples, hist_note = build_earnings_history(
+        symbol=sym,
+        fmp_api_key=cfg.fmp_api_key,
+        limit=limit,
+    )
+    moves = [
+        float(e.price_window_move_pct)
+        for e in history_tuples
+        if e.price_window_move_pct is not None
+    ]
+    avg_abs_move = (
+        round(sum(abs(m) for m in moves) / len(moves), 4) if moves else None
+    )
+
     return {
         "symbol": sym,
         "nextEarningsDate": next_dt,
-        "history": [],
-        "note": "历史财报后漂移与 IV crush 统计后续可接专用端点。",
+        "history": [
+            {
+                "date": e.date,
+                "eps": e.eps,
+                "epsEstimated": e.eps_estimated,
+                "revenue": e.revenue,
+                "priceWindowMovePct": e.price_window_move_pct,
+                "ivCrushPct": e.iv_crush_pct,
+                "source": e.source,
+            }
+            for e in history_tuples
+        ],
+        "summary": {
+            "avgAbsPriceWindowMovePct": avg_abs_move,
+            "eventCount": len(history_tuples),
+        },
+        "note": hist_note,
     }

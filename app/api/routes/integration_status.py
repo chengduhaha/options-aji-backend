@@ -57,6 +57,7 @@ class IntegrationEnvelope(BaseModel):
     generated_at_utc: str
     discord: DiscordIngest
     options_via_yfinance: OptionsProbe
+    stripe_billing_configured: bool = False
 
 
 def _preview_hints(
@@ -188,5 +189,8 @@ def integration_status(
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         discord=discord_block,
         options_via_yfinance=options_block,
+        stripe_billing_configured=bool(
+            settings.stripe_secret_key.strip() and settings.stripe_price_id_pro.strip()
+        ),
     )
     return envelope

@@ -8,11 +8,11 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import Select, delete, select
+from sqlalchemy import BigInteger, Select, cast, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.db.models import DiscordMessageRow
+from app.db.models import DiscordMessageRow, MessageEnrichmentRow
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,21 @@ class StoredDiscordMessage:
     content: Optional[str]
     timestamp_utc_iso: str
     tickers: list[str]
+
+
+@dataclass(frozen=True)
+class StoredDiscordFeedEntry:
+    id: str
+    channel_id: str
+    author: Optional[str]
+    content: Optional[str]
+    timestamp_utc_iso: str
+    tickers: list[str]
+    enrichment_title_zh: Optional[str]
+    enrichment_summary_zh: Optional[str]
+    enrichment_bullets_zh: tuple[str, ...]
+    enrichment_risk_zh: Optional[str]
+    enrichment_lang: Optional[str]
 
 
 def upsert_discord_row(
@@ -109,6 +124,69 @@ def list_messages_recent(
         )
         for r in trimmed
     ]
+
+
+def list_discord_feed_rows(
+    session: Session,
+    *,
+    ticker: Optional[str],
+    hours: int,
+    limit: int,
+) -> list[StoredDiscordFeedEntry]:
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
+    fetch_cap = (
+        limit
+        if ticker is None
+        else min(500, max(80, limit * 40))
+    )
+    stmt = (
+        select(DiscordMessageRow, MessageEnrichmentRow)
+        .outerjoin(
+            MessageEnrichmentRow,
+            MessageEnrichmentRow.message_id == DiscordMessageRow.id,
+        )
+        .where(DiscordMessageRow.timestamp >= since)
+        .order_by(DiscordMessageRow.timestamp.desc())
+        .limit(max(1, min(fetch_cap, 2000)))
+    )
+    pairs = list(session.execute(stmt).all())
+    out: list[StoredDiscordFeedEntry] = []
+    for row, enr in pairs:
+        if ticker:
+            ticker_u = ticker.strip().upper()
+            if ticker_u not in list(row.tickers or []):
+                continue
+        bullets: tuple[str, ...] = ()
+        if enr is not None and enr.bullets_zh:
+            bullets = tuple(str(b) for b in enr.bullets_zh if str(b).strip())
+        out.append(
+            StoredDiscordFeedEntry(
+                id=row.id,
+                channel_id=row.channel_id,
+                author=row.author,
+                content=row.content,
+                timestamp_utc_iso=row.timestamp.astimezone(dt.timezone.utc).isoformat(),
+                tickers=list(row.tickers or []),
+                enrichment_title_zh=enr.title_zh if enr else None,
+                enrichment_summary_zh=enr.summary_zh if enr else None,
+                enrichment_bullets_zh=bullets,
+                enrichment_risk_zh=enr.risk_note_zh if enr else None,
+                enrichment_lang=enr.language_detected if enr else None,
+            )
+        )
+
+    cap = max(1, min(limit, 500))
+    return out[:cap]
+
+
+def max_message_id_for_channel(session: Session, channel_id: str) -> str | None:
+    """Largest Discord snowflake id stored for channel (numeric compare)."""
+
+    stmt = select(func.max(cast(DiscordMessageRow.id, BigInteger))).where(
+        DiscordMessageRow.channel_id == channel_id
+    )
+    val = session.scalar(stmt)
+    return str(int(val)) if val is not None else None
 
 
 def row_tickers_dump(tickers: list[str]) -> str:

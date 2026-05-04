@@ -6,14 +6,14 @@ import json
 import logging
 import math
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import yfinance as yf
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.analytics.iv_metrics import vix_term_structure_hint
+from app.analytics.cboe_equity_pc import fetch_equity_pc_latest
 from app.analytics.market_hours import get_us_market_session
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
@@ -108,6 +108,12 @@ def market_overview(
             pcrs.append(float(p))
     pcr_mean = sum(pcrs) / len(pcrs) if pcrs else None
 
+    cfg = get_settings()
+    cboe_snap = fetch_equity_pc_latest(
+        csv_url=cfg.cboe_equity_pc_csv_url,
+        ttl_seconds=float(cfg.cboe_equity_pc_cache_seconds),
+    )
+
     unusual = _scan_unusual_top(toolkit, limit=5)
     earnings = _upcoming_earnings(watchlist=WATCHLIST_MOVER, days_ahead=14)
 
@@ -138,11 +144,32 @@ def market_overview(
             "vixSeries": vix_series,
             "termStructure": term,
         },
-        "liquidity": {
-            "putCallRatioVolumeApprox": pcr_mean,
-            "methodology": "Watchlist volume P/C mean from yfinance front expiry; not CBOE aggregate.",
-            "symbolsSampled": WATCHLIST_MOVER,
-        },
+        "liquidity": (
+            {
+                "putCallRatioEquityCboe": cboe_snap.put_call_ratio,
+                "cboeAsOf": cboe_snap.trade_date,
+                "cboeCallVolume": cboe_snap.call_volume,
+                "cboePutVolume": cboe_snap.put_volume,
+                "cboeTotalVolume": cboe_snap.total_volume,
+                "source": "CBOE_EQUITY_PC_CSV",
+                "sourceUrl": cboe_snap.source_url,
+                "putCallRatioVolumeApprox": pcr_mean,
+                "methodology": (
+                    "CBOE published equity options P/C CSV (aggregate); "
+                    "watchlist intraday P/C shown as putCallRatioVolumeApprox for context."
+                ),
+                "symbolsSampled": WATCHLIST_MOVER,
+            }
+            if cboe_snap is not None
+            else {
+                "putCallRatioVolumeApprox": pcr_mean,
+                "methodology": (
+                    "CBOE CSV unavailable; watchlist volume P/C mean from yfinance front expiry."
+                ),
+                "symbolsSampled": WATCHLIST_MOVER,
+                "source": "YFINANCE_WATCHLIST_FALLBACK",
+            }
+        ),
         "unusual": unusual,
         "earnings": earnings,
         "gexQuick": gex_quick,

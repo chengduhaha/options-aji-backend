@@ -19,7 +19,7 @@ from app.agents.user_agent import (
     gather_discord_snapshot,
     synthesize_llm_answer,
 )
-from app.api.deps import bearer_subscription_optional
+from app.api.billing_access import ensure_agent_billing
 
 router = APIRouter(tags=["agent"])
 
@@ -37,7 +37,7 @@ def _sse_pack(obj: dict[str, object]) -> bytes:
 @router.post("/api/agent/query")
 async def agent_query_stream(
     body: AgentQueryPayload,
-    _: Optional[str] = Depends(bearer_subscription_optional),
+    _: str = Depends(ensure_agent_billing),
 ) -> StreamingResponse:
     """SSE 流：`thinking` → `data_fetched` → `answer` → `done`。"""
 

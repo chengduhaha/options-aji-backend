@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.agent import router as agent_router
+from app.api.routes.billing import router as billing_router
 from app.api.routes.compat import router as compat_router
 from app.api.routes.discord_backfill import router as discord_backfill_router
 from app.api.routes.events import router as events_router
@@ -26,12 +27,17 @@ from app.api.routes.strategy_eval import router as strategy_eval_router
 from app.config import get_settings
 from app.db.bootstrap import init_db
 from app.ingest.discord_bot import parse_channel_ids, run_discord_ingest_forever
+from app.ingest.discord_history_rest import run_discord_gap_sync_loop
+from app.ingest.feed_enrichment import run_feed_enrichment_loop
+from app.logging_setup import apply_noise_filters
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+_cfg = get_settings()
+apply_noise_filters(enabled=_cfg.suppress_noisy_provider_logs)
 logger = logging.getLogger("optionsaji.main")
 
 
@@ -52,6 +58,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     Path("./data").mkdir(parents=True, exist_ok=True)
     init_db()
     _startup_discord_listener()
+    asyncio.create_task(run_discord_gap_sync_loop())
+    asyncio.create_task(run_feed_enrichment_loop())
 
     yield
 
@@ -78,6 +86,7 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(billing_router)
     app.include_router(health_router)
     app.include_router(compat_router)
     app.include_router(agent_router)
