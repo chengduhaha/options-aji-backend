@@ -147,6 +147,10 @@ class FMPClient:
     def get_earnings_calendar(self, from_date: str, to_date: str) -> list[dict]:
         return self._get("/earnings-calendar", {"from": from_date, "to": to_date}) or []
 
+    def get_earnings_history(self, symbol: str) -> list[dict]:
+        """Upcoming + historical earnings rows for one symbol (stable /earnings)."""
+        return self._get("/earnings", {"symbol": symbol.upper()}) or []
+
     def get_earnings_surprises(self, symbol: str) -> list[dict]:
         return self._get(f"/earnings-surprises/{symbol.upper()}") or []
 
@@ -258,7 +262,11 @@ class FMPClient:
         return None
 
     def get_all_index_quotes(self) -> list[dict]:
-        return self._get("/all-index-quotes") or []
+        data = self._get("/all-index-quotes")
+        if isinstance(data, list) and data:
+            return data
+        data = self._get("/full-index-quotes")
+        return data if isinstance(data, list) else []
 
     def get_sp500_components(self) -> list[dict]:
         return self._get("/sp500-index") or []

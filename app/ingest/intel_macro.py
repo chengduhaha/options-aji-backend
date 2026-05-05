@@ -7,8 +7,7 @@ import hashlib
 import logging
 import time
 
-import httpx
-
+from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -32,16 +31,10 @@ def fetch_macro_calendar_rows(
 
     today = dt.date.today()
     end = today + dt.timedelta(days=16)
-    url = (
-        "https://financialmodelingprep.com/api/v3/economic_calendar"
-        f"?from={today.isoformat()}&to={end.isoformat()}&apikey={key}"
-    )
     try:
-        with httpx.Client(timeout=45.0) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
+        client = get_fmp_client()
+        data = client.get_economic_calendar(today.isoformat(), end.isoformat())
+    except Exception as exc:
         logger.warning("FMP economic_calendar failed: %s", exc)
         return []
 

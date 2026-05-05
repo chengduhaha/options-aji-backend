@@ -71,7 +71,11 @@ def sync_options_chain_pipeline() -> None:
     try:
         for symbol in symbols:
             try:
-                snapshots = client.get_option_chain_snapshot(symbol)
+                snapshots = client.get_option_chain_snapshot(
+                    symbol,
+                    max_contracts=2500,
+                    max_pages=80,
+                )
                 if not snapshots:
                     logger.debug("No snapshots returned for %s", symbol)
                     continue

@@ -9,6 +9,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# Local virtualenv / caches
+venv/
+.cache/
+
 # Local SQLite (runtime)
 data/*.db
 data/*.db-journal

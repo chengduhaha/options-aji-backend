@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
-from app.api.deps import db_session_dep
+from app.db.session import db_session_dep
 from app.clients.massive_client import get_massive_client
 from app.config import get_settings
 from app.db.models import OptionsSnapshotRow
@@ -104,6 +104,8 @@ def get_options_chain(
                 expiration_date=expiration_date,
                 strike_price_gte=strike_min,
                 strike_price_lte=strike_max,
+                limit=min(limit, 250),
+                max_contracts=limit,
             )
             result = {
                 "symbol": sym,

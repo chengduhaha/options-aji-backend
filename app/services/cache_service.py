@@ -142,6 +142,11 @@ def key_market_actives() -> str:
 def key_market_open() -> str:
     return "market:is_open"
 
+
+def key_market_dashboard_overview() -> str:
+    """Aggregated home dashboard — pulse, liquidity, unusual, GEX snippet, etc."""
+    return "market:dashboard:overview"
+
 def key_macro_calendar(date_range: str) -> str:
     return f"macro:calendar:{date_range}"
 

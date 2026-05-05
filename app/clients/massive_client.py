@@ -99,13 +99,18 @@ class MassiveClient:
         strike_price_gte: Optional[float] = None,
         strike_price_lte: Optional[float] = None,
         limit: int = 250,
+        max_contracts: int = 500,
+        max_pages: int = 25,
     ) -> list[dict[str, Any]]:
         """GET /v3/snapshot/options/{underlyingAsset} — full chain or filtered.
 
-        Handles pagination automatically via next_url.
-        Returns flat list of contract snapshot dicts.
+        Follows next_url until exhausted or max_contracts / max_pages is reached (avoids
+        minutes-long full-chain pulls for liquid names like SPY on interactive API calls).
         """
-        params: dict[str, Any] = {"limit": limit}
+        page_limit = min(250, max(1, limit))
+        cap = max(1, min(50000, max_contracts))
+        page_cap = max(1, min(500, max_pages))
+        params: dict[str, Any] = {"limit": page_limit}
         if contract_type:
             params["contract_type"] = contract_type
         if expiration_date:
@@ -116,22 +121,30 @@ class MassiveClient:
             params["strike_price.lte"] = strike_price_lte
 
         results: list[dict[str, Any]] = []
-        url = f"{self.base_url}/v3/snapshot/options/{underlying.upper()}"
+        url: Optional[str] = f"{self.base_url}/v3/snapshot/options/{underlying.upper()}"
+        pages = 0
 
-        while url:
+        while url and len(results) < cap and pages < page_cap:
             try:
                 with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-                    resp = client.get(url, headers=self._headers, params=params if results == [] else {})
+                    use_params = params if pages == 0 else None
+                    resp = client.get(url, headers=self._headers, params=use_params)
                     resp.raise_for_status()
                     data = resp.json()
             except Exception as exc:
                 logger.warning("Massive chain snapshot %s: %s", underlying, exc)
                 break
 
-            results.extend(data.get("results", []))
-            url = data.get("next_url", "")  # paginate
-            if not url:
+            batch = data.get("results", [])
+            if isinstance(batch, list):
+                results.extend(batch)
+            pages += 1
+            if len(results) >= cap:
+                results = results[:cap]
                 break
+
+            nxt = data.get("next_url", "")
+            url = str(nxt).strip() if nxt else None
 
         return results
 

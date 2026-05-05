@@ -7,9 +7,10 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import httpx
 import pandas as pd
 import yfinance as yf
+
+from app.clients.fmp_client import get_fmp_client
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +75,10 @@ def fetch_fmp_historical_earnings(
     if not key:
         return []
     sym = symbol.strip().upper()
-    url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{sym}?apikey={key}"
     try:
-        with httpx.Client(timeout=45.0) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
+        client = get_fmp_client()
+        data = client.get_earnings_history(sym)
+    except Exception as exc:
         logger.warning("FMP earnings %s: %s", sym, exc)
         return []
     if not isinstance(data, list):
@@ -126,15 +124,15 @@ def build_earnings_history(
             out.append(
                 EarningsHistoryEntry(
                     date=ed.isoformat(),
-                    eps=_f("eps"),
+                    eps=_f("epsActual") or _f("eps"),
                     eps_estimated=_f("epsEstimated"),
-                    revenue=_f("revenue"),
+                    revenue=_f("revenueActual") or _f("revenue"),
                     price_window_move_pct=move,
                     iv_crush_pct=None,
                     source="FMP+yfinance",
                 ),
             )
-        note = "历史行：FMP historical earning_calendar；涨跌幅为事件日前后首个可用交易日的收盘价变动（%）。IV crush 需历史期权链。"
+        note = "历史行：FMP /stable/earnings；涨跌幅为事件日前后首个可用交易日的收盘价变动（%）。IV crush 需历史期权链。"
         return out, note
 
     # yfinance-only fallback (dates + moves, no EPS detail)

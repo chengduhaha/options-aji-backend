@@ -10,14 +10,20 @@ from typing import Any, Optional
 
 import httpx
 import yfinance as yf
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from app.analytics.cboe_equity_pc import fetch_equity_pc_latest
 from app.analytics.iv_metrics import vix_term_structure_hint
 from app.analytics.market_hours import get_us_market_session
 from app.api.deps import bearer_subscription_optional
+from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
+from app.services.cache_service import (
+    cache_get,
+    cache_set,
+    key_market_dashboard_overview,
+)
 from app.tools.openbb_tools import OpenBBToolkit, build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -40,8 +46,18 @@ class AiSummaryResponse(BaseModel):
 @router.get("/overview")
 def market_overview(
     _: Optional[str] = Depends(bearer_subscription_optional),
+    refresh: bool = Query(False, description="为 true 时跳过 Redis，强制重新拉取并写回缓存"),
 ) -> dict[str, object]:
     """Single payload for OptionsAji home dashboard."""
+
+    cfg = get_settings()
+    cache_key = key_market_dashboard_overview()
+    if not refresh and cfg.redis_enabled:
+        hit = cache_get(cache_key)
+        if isinstance(hit, dict):
+            out = dict(hit)
+            out["fromCache"] = True
+            return out
 
     toolkit = build_default_toolkit()
     session, session_label = get_us_market_session()
@@ -64,7 +80,7 @@ def market_overview(
             }
         )
 
-    # VIX mini series (5 sessions)
+    # VIX mini series (5 sessions) + levels (prefer pulse/FMP when yfinance empty)
     vix_series: list[float] = []
     vix_last: Optional[float] = None
     vix_chg: Optional[float] = None
@@ -87,6 +103,17 @@ def market_overview(
             vix_chg = float((float(lp) - float(pc)) / float(pc) * 100.0)
     except Exception as exc:
         logger.warning("vix mini series: %s", exc)
+
+    if vix_last is None or vix_chg is None:
+        for row in pulse_out:
+            if row.get("symbol") == "VIX":
+                px = row.get("price")
+                if vix_last is None and isinstance(px, (int, float)):
+                    vix_last = float(px)
+                cp = row.get("changePct")
+                if vix_chg is None and isinstance(cp, (int, float)):
+                    vix_chg = float(cp)
+                break
 
     band = "未知"
     if vix_last is not None:
@@ -133,7 +160,7 @@ def market_overview(
 
     import datetime as dt
 
-    return {
+    payload: dict[str, object] = {
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "marketSession": session,
         "marketSessionLabel": session_label,
@@ -175,7 +202,13 @@ def market_overview(
         "earnings": earnings,
         "gexQuick": gex_quick,
         "watchlist": WATCHLIST_MOVER,
+        "fromCache": False,
     }
+
+    if cfg.redis_enabled:
+        cache_set(cache_key, payload, ttl=int(cfg.redis_cache_ttl_hot))
+
+    return payload
 
 
 def _scan_unusual_top(toolkit: OpenBBToolkit, *, limit: int) -> list[dict[str, object]]:
@@ -224,6 +257,39 @@ def _upcoming_earnings(*, watchlist: list[str], days_ahead: int) -> list[dict[st
     out: list[dict[str, object]] = []
     today = dt.datetime.now(dt.timezone.utc).date()
     horizon = today + dt.timedelta(days=days_ahead)
+    sym_set = {s.strip().upper() for s in watchlist if s.strip()}
+    cfg = get_settings()
+    if cfg.fmp_api_key.strip():
+        try:
+            fmp = get_fmp_client()
+            rows = fmp.get_earnings_calendar(today.isoformat(), horizon.isoformat())
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    sym = str(row.get("symbol") or "").strip().upper()
+                    if sym not in sym_set:
+                        continue
+                    raw = row.get("date")
+                    if not isinstance(raw, str) or len(raw) < 10:
+                        continue
+                    try:
+                        ed = dt.date.fromisoformat(raw[:10])
+                    except ValueError:
+                        continue
+                    if today <= ed <= horizon:
+                        out.append(
+                            {
+                                "symbol": sym,
+                                "date": ed.isoformat(),
+                                "note": "FMP earnings-calendar。",
+                            }
+                        )
+            out.sort(key=lambda x: str(x.get("date")))
+            return out[:12]
+        except Exception as exc:
+            logger.warning("FMP upcoming earnings: %s", exc)
+
     for sym in watchlist:
         try:
             t = yf.Ticker(sym)

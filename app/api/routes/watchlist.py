@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
-from app.api.deps import db_session_dep
+from app.db.session import db_session_dep
 from app.db.models import WatchlistRow
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])

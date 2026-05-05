@@ -18,9 +18,62 @@ import yfinance as yf
 
 from app.analytics.gex_compute import compute_gex_profile
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
+from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_dict_from_fmp_row(guard: str, d: dict[str, object]) -> dict[str, object] | None:
+    """Map FMP /stable/quote fields to get_quote() shape."""
+    price_raw = d.get("price")
+    if price_raw is None:
+        return None
+    try:
+        last = float(price_raw)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(last):
+        return None
+
+    prev_raw = d.get("previousClose")
+    prev: float | None = None
+    if prev_raw is not None and str(prev_raw) != "":
+        try:
+            prev = float(prev_raw)
+        except (TypeError, ValueError):
+            prev = None
+    if prev is None:
+        chg = d.get("change")
+        if isinstance(chg, (int, float)) and not (isinstance(chg, float) and math.isnan(chg)):
+            prev = last - float(chg)
+
+    pct_raw = d.get("changesPercentage")
+    if pct_raw is None:
+        pct_raw = d.get("changePercentage")
+    pct: float | None = None
+    if pct_raw is not None and str(pct_raw) != "":
+        try:
+            pct = float(pct_raw)
+        except (TypeError, ValueError):
+            pct = None
+    if pct is None and prev is not None and prev > 0:
+        pct = (last - prev) / prev * 100.0
+
+    day_high = d.get("dayHigh")
+    day_low = d.get("dayLow")
+    vol = d.get("volume")
+    open_ = d.get("open")
+    return {
+        "symbol": guard,
+        "last_price": last,
+        "previous_close": prev,
+        "change_pct": pct,
+        "regular_market_open": open_,
+        "day_high": day_high,
+        "day_low": day_low,
+        "volume": vol,
+    }
 
 
 @dataclass(frozen=True)
@@ -31,6 +84,24 @@ class OpenBBToolkit:
         guard = symbol.strip().upper()
         if not guard:
             return {"error": "empty_symbol"}
+
+        settings = get_settings()
+        if settings.fmp_api_key.strip():
+            try:
+                fmp = get_fmp_client()
+                row = fmp.get_quote(guard)
+                if isinstance(row, dict):
+                    parsed = _quote_dict_from_fmp_row(guard, row)
+                    if parsed is not None:
+                        return parsed
+                if guard.startswith("^"):
+                    row2 = fmp.get_index_quote(guard)
+                    if isinstance(row2, dict):
+                        parsed2 = _quote_dict_from_fmp_row(guard, row2)
+                        if parsed2 is not None:
+                            return parsed2
+            except Exception as exc:
+                logger.warning("get_quote FMP(%s): %s", guard, exc)
 
         try:
             ticker = yf.Ticker(guard)
