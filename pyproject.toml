@@ -4,25 +4,58 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "options-aji-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+  # Web framework
   "fastapi[standard]>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "pydantic>=2.7.0",
   "pydantic-settings>=2.2.0",
+
+  # Database — PostgreSQL (primary)
   "sqlalchemy>=2.0.30",
+  "psycopg2-binary>=2.9.9",
+  "alembic>=1.13.0",
+
+  # Cache — Redis
+  "redis>=5.0.0",
+  "hiredis>=2.3.0",
+
+  # HTTP clients
+  "httpx>=0.27.0",
+  "aiohttp>=3.9.0",
+
+  # Market data
+  "yfinance>=0.2.40",
+  "pandas>=2.1.0",
+  "numpy>=1.26.0",
+
+  # Analytics
+  "scipy>=1.11.0",
+
+  # Task scheduling
+  "apscheduler>=3.10.4",
+
+  # Discord integration
   "discord.py>=2.4.0",
+
+  # LLM
   "langchain-openai>=0.2.0",
   "langchain-core>=0.3.0",
-  "httpx>=0.27.0",
-  "yfinance>=0.2.40",
+  "openai>=1.30.0",
+
+  # Billing
   "stripe>=11.0.0",
-  "pandas>=2.1.0",
+
+  # Utilities
   "lxml>=5.0.0",
+  "python-dateutil>=2.9.0",
+  "pytz>=2024.1",
+  "orjson>=3.9.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23.0", "httpx>=0.27.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]
