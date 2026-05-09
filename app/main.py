@@ -13,13 +13,11 @@ from app.api.routes.agent import router as agent_router
 from app.api.routes.analyst import router as analyst_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.compat import router as compat_router
-from app.api.routes.congress import router as congress_router
 from app.api.routes.discord_backfill import router as discord_backfill_router
 from app.api.routes.etf import router as etf_router
 from app.api.routes.events import router as events_router
 from app.api.routes.feed_unified import router as feed_unified_router
 from app.api.routes.health import router as health_router
-from app.api.routes.insider import router as insider_router
 from app.api.routes.integration_status import router as integration_router
 from app.api.routes.macro import router as macro_router
 from app.api.routes.market_dashboard import router as market_dashboard_router
@@ -126,8 +124,6 @@ def create_application() -> FastAPI:
     app.include_router(options_router)
     app.include_router(market_overview_router)
     app.include_router(macro_router)
-    app.include_router(insider_router)
-    app.include_router(congress_router)
     app.include_router(etf_router)
     app.include_router(news_router)
     app.include_router(analyst_router)

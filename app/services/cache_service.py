@@ -162,12 +162,6 @@ def key_ai_market_summary() -> str:
 def key_ai_stock_summary(symbol: str) -> str:
     return f"ai:stock_summary:{symbol.upper()}"
 
-def key_congress_latest() -> str:
-    return "congress:latest"
-
-def key_insider_latest() -> str:
-    return "insider:latest"
-
 def key_analyst_ratings(symbol: str) -> str:
     return f"analyst:ratings:{symbol.upper()}"
 

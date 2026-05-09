@@ -166,8 +166,24 @@ def get_earnings_calendar(symbol: str, limit: int = Query(8, le=20)):
     cfg = get_settings()
     if not cfg.fmp_api_key:
         return {"symbol": sym, "earnings": []}
-    surprises = get_fmp_client().get_earnings_surprises(sym)
-    return {"symbol": sym, "earnings": surprises}
+    # Fallback: live FMP /earnings (not surprises — that endpoint returns empty)
+    try:
+        raw = get_fmp_client().get_earnings_history(sym)
+        parsed = [
+            {
+                "date": str(r.get("date", "")),
+                "eps_estimate": r.get("epsEstimated"),
+                "eps_actual": r.get("epsActual"),
+                "surprise_pct": r.get("surprisePct"),
+                "time": r.get("time"),
+                "is_confirmed": bool(r.get("updatedFromDate")),
+            }
+            for r in raw[:limit]
+        ]
+        return {"symbol": sym, "earnings": parsed, "source": "live_api"}
+    except Exception as exc:
+        logger.warning("Earnings live fallback failed for %s: %s", sym, exc)
+    return {"symbol": sym, "earnings": []}
 
 
 @router.get("/{symbol}/profile")

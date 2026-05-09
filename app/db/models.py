@@ -251,46 +251,6 @@ class StockNewsRow(Base):
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class InsiderTradeRow(Base):
-    """FMP /stable/insider-trading."""
-    __tablename__ = "insider_trades"
-    __table_args__ = (Index("idx_it_symbol_date", "symbol", "transaction_date"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
-    filer_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    filer_relation: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    transaction_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    transaction_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
-    shares: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    price_per_share: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    total_value: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    shares_owned_after: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    filing_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
-    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class CongressTradeRow(Base):
-    """FMP /stable/senate-latest-trading and /stable/house-latest-trading."""
-    __tablename__ = "congress_trades"
-    __table_args__ = (
-        Index("idx_ct_symbol_date", "symbol", "transaction_date"),
-        Index("idx_ct_date", "transaction_date"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    chamber: Mapped[str] = mapped_column(String(8), nullable=False)  # senate/house
-    member_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    symbol: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    asset_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    transaction_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    transaction_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
-    amount_range: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    filing_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
-    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
 class AnalystRatingRow(Base):
     """FMP /stable/stock-grades — analyst rating changes."""
     __tablename__ = "analyst_ratings"

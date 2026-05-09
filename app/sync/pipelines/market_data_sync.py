@@ -1,4 +1,4 @@
-"""Market intelligence sync pipelines — sectors, movers, macro, news, insider, congress."""
+"""Market intelligence sync pipelines — sectors, movers, macro, news, analyst ratings."""
 from __future__ import annotations
 
 import logging
@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
 from app.db.models import (
-    AnalystRatingRow, CongressTradeRow, EarningsCalendarRow,
-    InsiderTradeRow, MacroCalendarRow, SectorPerformanceRow,
+    AnalystRatingRow, EarningsCalendarRow,
+    MacroCalendarRow, SectorPerformanceRow,
     StockNewsRow, TreasuryRateRow,
 )
 from app.db.session import SessionLocal
@@ -17,7 +17,7 @@ from app.services.cache_service import (
     cache_set,
     key_market_sectors, key_market_gainers, key_market_losers, key_market_actives,
     key_macro_calendar, key_treasury_rates, key_earnings_calendar,
-    key_stock_news, key_insider_latest, key_congress_latest, key_analyst_ratings,
+    key_stock_news, key_analyst_ratings,
 )
 
 logger = logging.getLogger(__name__)
@@ -294,102 +294,6 @@ def sync_news_pipeline() -> None:
     except Exception as exc:
         session.rollback()
         logger.warning("News sync failed: %s", exc)
-    finally:
-        session.close()
-
-
-def sync_insider_trades_pipeline() -> None:
-    cfg = get_settings()
-    if not cfg.fmp_api_key:
-        return
-    client = get_fmp_client()
-    session = SessionLocal()
-    try:
-        trades = client.get_insider_trading_latest(page=0)
-        ts = datetime.now(timezone.utc)
-
-        for t in trades:
-            symbol = (t.get("symbol") or "").upper()
-            date_str = t.get("transactionDate")
-            try:
-                t_date = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else None
-            except ValueError:
-                t_date = None
-
-            session.add(InsiderTradeRow(
-                symbol=symbol,
-                filer_name=t.get("reportingName"),
-                filer_relation=t.get("typeOfOwner"),
-                transaction_type=t.get("transactionType"),
-                transaction_date=t_date,
-                shares=t.get("securitiesTransacted"),
-                price_per_share=t.get("price"),
-                total_value=(
-                    int(t["securitiesTransacted"] * t["price"])
-                    if t.get("securitiesTransacted") and t.get("price") else None
-                ),
-                shares_owned_after=t.get("securitiesOwned"),
-                filing_date=None,
-                synced_at=ts,
-            ))
-
-        session.commit()
-        cache_set(key_insider_latest(), {"trades": trades[:50], "synced_at": ts.isoformat()}, ttl=TTL_WARM)
-        logger.info("Insider trades sync: %d records", len(trades))
-    except Exception as exc:
-        session.rollback()
-        logger.warning("Insider trades sync failed: %s", exc)
-    finally:
-        session.close()
-
-
-def sync_congress_trades_pipeline() -> None:
-    cfg = get_settings()
-    if not cfg.fmp_api_key:
-        return
-    client = get_fmp_client()
-    session = SessionLocal()
-    try:
-        senate = client.get_senate_latest_trading(page=0)
-        house = client.get_house_latest_trading(page=0)
-        ts = datetime.now(timezone.utc)
-
-        all_trades = [("senate", senate), ("house", house)]
-        total = 0
-        for chamber, trades in all_trades:
-            for t in trades:
-                date_str = t.get("transactionDate")
-                try:
-                    t_date = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else None
-                except ValueError:
-                    t_date = None
-                filing_str = t.get("disclosureDate")
-                try:
-                    f_date = datetime.strptime(filing_str, "%Y-%m-%d").date() if filing_str else None
-                except ValueError:
-                    f_date = None
-
-                session.add(CongressTradeRow(
-                    chamber=chamber,
-                    member_name=t.get("representative") or t.get("senator"),
-                    symbol=t.get("ticker", "").upper() or None,
-                    asset_description=t.get("assetDescription"),
-                    transaction_type=t.get("type"),
-                    transaction_date=t_date,
-                    amount_range=t.get("amount"),
-                    filing_date=f_date,
-                    raw_json=t,
-                    synced_at=ts,
-                ))
-                total += 1
-
-        session.commit()
-        combined = senate[:25] + house[:25]
-        cache_set(key_congress_latest(), {"trades": combined, "synced_at": ts.isoformat()}, ttl=TTL_WARM)
-        logger.info("Congress trades sync: %d records", total)
-    except Exception as exc:
-        session.rollback()
-        logger.warning("Congress trades sync failed: %s", exc)
     finally:
         session.close()
 

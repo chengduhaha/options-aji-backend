@@ -193,14 +193,9 @@ class FMPClient:
     def search_news(self, query: str, page: int = 0) -> list[dict]:
         return self._get("/search-news/stock", {"query": query, "page": page}) or []
 
-    def get_insider_trading(self, symbol: str, page: int = 0, limit: int = 100) -> list[dict]:
-        return self._get("/insider-trading", {"symbol": symbol.upper(), "page": page, "limit": limit}) or []
-
-    def get_insider_trading_latest(self, page: int = 0) -> list[dict]:
-        return self._get("/insider-trading", {"page": page}) or []
-
     def get_analyst_ratings(self, symbol: str) -> list[dict]:
-        return self._get("/stock-grades", {"symbol": symbol.upper()}) or []
+        # FMP Stable API renamed: stock-grades → grades
+        return self._get("/grades", {"symbol": symbol.upper()}) or []
 
     def get_price_target_summary(self, symbol: str) -> Optional[dict]:
         data = self._get("/price-target-summary", {"symbol": symbol.upper()})
@@ -223,16 +218,19 @@ class FMPClient:
         return self._get("/industry-performance") or []
 
     def get_gainers(self) -> list[dict]:
-        return self._get("/stock-market-gainers") or []
+        # FMP Stable API renamed this endpoint
+        return self._get("/biggest-gainers") or []
 
     def get_losers(self) -> list[dict]:
-        return self._get("/stock-market-losers") or []
+        # FMP Stable API renamed this endpoint
+        return self._get("/biggest-losers") or []
 
     def get_most_actives(self) -> list[dict]:
-        return self._get("/stock-market-most-actives") or []
+        # FMP Stable API renamed this endpoint
+        return self._get("/most-actives") or []
 
     def get_sector_pe(self) -> list[dict]:
-        return self._get("/sector-pe-snapshot") or []
+        return self._get("/sector-performance") or []
 
     # ── Macro Economics ───────────────────────────────────────────────────────
 
@@ -256,17 +254,26 @@ class FMPClient:
     # ── Indices ─────────────────────────────────────────────────────────────────
 
     def get_index_quote(self, symbol: str) -> Optional[dict]:
-        data = self._get("/index-quote", {"symbol": symbol})
+        # FMP Stable API: /index-quote is unavailable; use /quote with the raw symbol
+        data = self._get("/quote", {"symbol": symbol})
         if isinstance(data, list) and data:
             return data[0]
         return None
 
     def get_all_index_quotes(self) -> list[dict]:
-        data = self._get("/all-index-quotes")
-        if isinstance(data, list) and data:
-            return data
-        data = self._get("/full-index-quotes")
-        return data if isinstance(data, list) else []
+        """FMP Stable API removed all-index-quotes; fetch known major indices individually via /quote."""
+        # Major US indices + common global indices
+        major_symbols = [
+            "^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX",
+            "^NYA", "^XAX", "^BATSK",
+            "^FTSE", "^N225", "^HSI", "^STOXX50E",
+        ]
+        results = []
+        for sym in major_symbols:
+            data = self._get("/quote", {"symbol": sym})
+            if isinstance(data, list) and data:
+                results.append(data[0])
+        return results
 
     def get_sp500_components(self) -> list[dict]:
         return self._get("/sp500-index") or []
@@ -281,18 +288,6 @@ class FMPClient:
         return self._get("/is-the-market-open")
 
     # ── Congress / Insider ────────────────────────────────────────────────────
-
-    def get_senate_latest_trading(self, page: int = 0) -> list[dict]:
-        return self._get("/senate-latest-trading", {"page": page}) or []
-
-    def get_house_latest_trading(self, page: int = 0) -> list[dict]:
-        return self._get("/house-latest-trading", {"page": page}) or []
-
-    def get_senate_trading_by_symbol(self, symbol: str) -> list[dict]:
-        return self._get("/senate-trading-activity", {"symbol": symbol.upper()}) or []
-
-    def get_house_trading_by_symbol(self, symbol: str) -> list[dict]:
-        return self._get("/senate-trading-activity", {"symbol": symbol.upper()}) or []
 
     # ── ETF ───────────────────────────────────────────────────────────────────
 

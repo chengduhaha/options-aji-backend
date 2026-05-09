@@ -61,8 +61,6 @@ def start_scheduler() -> None:
         sync_treasury_rates_pipeline,
         sync_earnings_calendar_pipeline,
         sync_news_pipeline,
-        sync_insider_trades_pipeline,
-        sync_congress_trades_pipeline,
         sync_analyst_ratings_pipeline,
     )
 
@@ -119,16 +117,6 @@ def start_scheduler() -> None:
         lambda: _run_safe(sync_treasury_rates_pipeline, "treasury"),
         CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=tz),
         id="treasury", replace_existing=True,
-    )
-    _scheduler.add_job(
-        lambda: _run_safe(sync_insider_trades_pipeline, "insider"),
-        CronTrigger(hour=17, minute=15, day_of_week="mon-fri", timezone=tz),
-        id="insider", replace_existing=True,
-    )
-    _scheduler.add_job(
-        lambda: _run_safe(sync_congress_trades_pipeline, "congress"),
-        CronTrigger(hour=17, minute=30, day_of_week="mon-fri", timezone=tz),
-        id="congress", replace_existing=True,
     )
 
     _scheduler.start()
