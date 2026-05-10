@@ -204,6 +204,8 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
             "2. 期权数据解读（IV 期限结构、Skew、持仓分布）\n"
             "3. 关键风险点\n"
             "4. 多时间维度视角\n"
+            "在回复结尾如果涉及 GEX 数据，追加一个 JSON block 格式如下：\n"
+            '```json\n{"cards":{"items":[{"label":"Net GEX","value":"$2.4B","color":"text-green"},{"label":"Gamma Flip","value":"$525","color":"text-foreground"},{"label":"Call Wall","value":"$560","color":"text-foreground"},{"label":"Put Wall","value":"$540","color":"text-foreground"}]}}\n```\n'
             "使用数据支撑结论，标注关键数值。\n"
         ),
         "strategy": (
@@ -213,6 +215,8 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
             "2. 最大收益 / 最大亏损 / 盈亏平衡点\n"
             "3. Greeks 暴露分析\n"
             "4. 隐含概率参考\n"
+            "在回复结尾追加一个 JSON block 格式如下：\n"
+            '```json\n{"table":{"headers":["策略","构建","最大收益","最大亏损","盈亏平衡"],"rows":[["Bull Call Spread","买入 $740C + 卖出 $750C","$10/share","$2.50/share","$742.50"]]}}\n```\n'
             "给出 1-2 个备选策略比较优劣。\n"
         ),
     }
