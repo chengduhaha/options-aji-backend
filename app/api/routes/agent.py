@@ -28,6 +28,7 @@ class AgentQueryPayload(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     ticker: Optional[str] = Field(default=None, max_length=12)
     session_id: Optional[str] = Field(default=None, max_length=64)
+    mode: str = Field(default="fast", pattern="^(fast|analysis|strategy)$")
 
 
 def _sse_pack(obj: dict[str, object]) -> bytes:
@@ -44,16 +45,18 @@ async def agent_query_stream(
     ticker_str = None if body.ticker is None else body.ticker.upper()
 
     async def gen_bytes() -> AsyncIterator[bytes]:
+        mode_label = {"fast": "快速问答", "analysis": "深度分析", "strategy": "策略评估"}.get(body.mode, "快速问答")
         yield _sse_pack(
             {
                 "type": "thinking",
-                "content": "开始处理：解析提问与标的提示，并准备载入 Discord 存档上下文。",
+                "content": f"开始处理（{mode_label}模式）：解析提问与标的提示，并准备载入 Discord 存档上下文。",
             },
         )
         try:
             initial = build_initial_agent_state(
                 question=body.question,
                 ticker=ticker_str,
+                mode=body.mode,
             )
             if not initial.get("question", "").strip():
                 yield _sse_pack({"type": "error", "content": "问题不能为空。"})
