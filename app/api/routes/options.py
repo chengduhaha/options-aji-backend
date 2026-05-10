@@ -240,14 +240,41 @@ def get_atm_option_history(
     """Return OHLCV bars for the ATM option of a given symbol + expiration."""
     sym = symbol.upper()
     from sqlalchemy import func
+
+    spot = None
     spot_row = db.execute(
         select(OptionsSnapshotRow.underlying_price)
         .where(OptionsSnapshotRow.underlying_ticker == sym)
         .limit(1)
     ).scalar()
-    if not spot_row:
+    if spot_row:
+        spot = float(spot_row)
+    else:
+        try:
+            cfg = get_settings()
+            if cfg.fmp_api_key:
+                from app.clients.fmp_client import get_fmp_client
+                q = get_fmp_client().get_quote(sym)
+                if q and q.get("price"):
+                    spot = float(q["price"])
+        except Exception:
+            pass
+
+    if not spot:
+        # Last resort: use midpoint from any contract in chain
+        try:
+            from sqlalchemy import func as sa_func
+            mid = db.execute(
+                select(sa_func.avg(OptionsSnapshotRow.midpoint))
+                .where(OptionsSnapshotRow.underlying_ticker == sym)
+            ).scalar()
+            if mid:
+                spot = float(mid)
+        except Exception:
+            pass
+
+    if not spot:
         return {"symbol": sym, "bars": [], "error": "no_spot_price"}
-    spot = float(spot_row)
 
     contract = db.execute(
         select(OptionsSnapshotRow)
