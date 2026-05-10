@@ -14,6 +14,7 @@ from app.analytics.earnings_depth import build_earnings_history
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
+from app.services.cache_service import TTL_HOT, cache_get, cache_set, key_stock_overview
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -26,8 +27,11 @@ def stock_overview(
     symbol: str,
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
-    tk = build_default_toolkit()
     sym = symbol.strip().upper()
+    cached = cache_get(key_stock_overview(sym))
+    if cached:
+        return cached
+    tk = build_default_toolkit()
     bar = tk.frontend_market_bar(sym)
     qt = tk.get_quote(sym)
 
@@ -103,7 +107,7 @@ def stock_overview(
     except Exception:
         pass
 
-    return {
+    result = {
         "symbol": sym,
         "quote": qt,
         "bar": bar,
@@ -130,6 +134,8 @@ def stock_overview(
         "expectedMoves": expected_moves,
         "earnings": {"nextDate": next_earn, "daysTo": days_to},
     }
+    cache_set(key_stock_overview(sym), result, ttl=TTL_HOT)
+    return result
 
 
 def _expected_moves_for_symbol(symbol: str, spot: float) -> list[dict[str, object]]:

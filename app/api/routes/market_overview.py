@@ -91,8 +91,13 @@ def get_market_hours():
 
 @router.get("/indices")
 def get_indices():
+    cached = cache_get("market:indices")
+    if cached:
+        return cached
     cfg = get_settings()
     if not cfg.fmp_api_key:
         return {"indices": []}
     data = get_fmp_client().get_all_index_quotes()
-    return {"indices": data, "synced_at": datetime.now(timezone.utc).isoformat()}
+    result = {"indices": data, "synced_at": datetime.now(timezone.utc).isoformat()}
+    cache_set("market:indices", result, ttl=TTL_HOT)
+    return result
