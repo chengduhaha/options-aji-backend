@@ -192,3 +192,114 @@ def get_unusual_options(
             "underlying_price": r.underlying_price,
         })
     return {"contracts": result, "count": len(result)}
+
+
+@router.get("/bars/{ticker}")
+def get_option_bars(
+    ticker: str,
+    multiplier: int = Query(1),
+    timespan: str = Query("day"),
+    from_date: str = Query(...),
+    to_date: str = Query(...),
+    limit: int = Query(500, le=5000),
+):
+    """Return OHLCV bars for an options contract from Massive API."""
+    cfg = get_settings()
+    if not cfg.massive_api_key:
+        return {"ticker": ticker, "bars": [], "error": "massive_api_not_configured"}
+    try:
+        client = get_massive_client()
+        data = client.get_bars(ticker, multiplier, timespan, from_date, to_date, limit=limit)
+        results = data.get("results", [])
+        bars = [
+            {
+                "timestamp": bar["t"],
+                "open": bar["o"],
+                "high": bar["h"],
+                "low": bar["l"],
+                "close": bar["c"],
+                "volume": bar.get("v", 0),
+                "vwap": bar.get("vw", bar["c"]),
+            }
+            for bar in results
+        ]
+        return {"ticker": ticker, "bars": bars, "count": len(bars)}
+    except Exception as exc:
+        logger.warning("Options bars failed for %s: %s", ticker, exc)
+        return {"ticker": ticker, "bars": [], "error": str(exc)}
+
+
+@router.get("/atm-history/{symbol}")
+def get_atm_option_history(
+    symbol: str,
+    expiration: str = Query(...),
+    contract_type: str = Query("call"),
+    days_back: int = Query(60, le=365),
+    db: Session = Depends(db_session_dep),
+):
+    """Return OHLCV bars for the ATM option of a given symbol + expiration."""
+    sym = symbol.upper()
+    from sqlalchemy import func
+    spot_row = db.execute(
+        select(OptionsSnapshotRow.underlying_price)
+        .where(OptionsSnapshotRow.underlying_ticker == sym)
+        .limit(1)
+    ).scalar()
+    if not spot_row:
+        return {"symbol": sym, "bars": [], "error": "no_spot_price"}
+    spot = float(spot_row)
+
+    contract = db.execute(
+        select(OptionsSnapshotRow)
+        .where(
+            and_(
+                OptionsSnapshotRow.underlying_ticker == sym,
+                OptionsSnapshotRow.expiration_date == expiration,
+                OptionsSnapshotRow.contract_type == contract_type,
+            )
+        )
+        .order_by(func.abs(OptionsSnapshotRow.strike_price - spot))
+        .limit(1)
+    ).scalar_one_or_none()
+    if not contract:
+        return {"symbol": sym, "bars": [], "error": "no_contract_found"}
+
+    options_ticker = contract.ticker
+    cfg = get_settings()
+    if not cfg.massive_api_key:
+        return {"ticker": options_ticker, "bars": [], "error": "massive_api_not_configured"}
+
+    import datetime as dt
+    today = dt.datetime.now(dt.timezone.utc)
+    from_date = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
+    to_date = today.strftime("%Y-%m-%d")
+
+    try:
+        client = get_massive_client()
+        data = client.get_bars(options_ticker, 1, "day", from_date, to_date, limit=days_back)
+        results = data.get("results", [])
+        bars = [
+            {
+                "timestamp": bar["t"],
+                "open": bar["o"],
+                "high": bar["h"],
+                "low": bar["l"],
+                "close": bar["c"],
+                "volume": bar.get("v", 0),
+                "vwap": bar.get("vw", bar["c"]),
+            }
+            for bar in results
+        ]
+        return {
+            "symbol": sym,
+            "ticker": options_ticker,
+            "strike": float(contract.strike_price),
+            "expiration": str(contract.expiration_date),
+            "contract_type": contract_type,
+            "underlying_price": spot,
+            "bars": bars,
+            "count": len(bars),
+        }
+    except Exception as exc:
+        logger.warning("ATM history failed for %s: %s", sym, exc)
+        return {"symbol": sym, "bars": [], "error": str(exc)}

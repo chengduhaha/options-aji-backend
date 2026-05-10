@@ -1,15 +1,62 @@
-"""Application settings — loaded from .env file."""
+"""Application settings.
+
+职责分工：
+
+- **本文件 (config.py)**：声明有哪些配置项、类型与**非敏感默认值**。这是代码，应提交 Git；
+  不应把真实密钥写死在源码里。
+
+- **settings.toml**（可选，与 ``app/`` 同级）：推荐的「单一运维配置文件」，复制
+  ``settings.example.toml`` 后填写；已在 ``.gitignore``，勿提交。
+
+- **.env**（可选）：与 Docker / 旧部署兼容；字段名与环境变量一致（大写）。
+
+加载优先级（同名键，先出现的生效——后面的来源无法覆盖）：
+
+``构造函数参数 > 环境变量 > settings.toml > .env > 本文件中的默认值``
+
+因此线上可用环境变量覆盖文件中的配置；本地可只维护 ``settings.toml``，不必同时维护两份密钥列表。
+"""
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+from pydantic_settings.sources import TomlConfigSettingsSource
+
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_DOTENV_PATH = _BACKEND_ROOT / ".env"
+_SETTINGS_TOML_PATH = _BACKEND_ROOT / "settings.toml"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_DOTENV_PATH if _DOTENV_PATH.is_file() else None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        sources: list[PydanticBaseSettingsSource] = [
+            init_settings,
+            env_settings,
+        ]
+        if _SETTINGS_TOML_PATH.is_file():
+            sources.append(TomlConfigSettingsSource(settings_cls, _SETTINGS_TOML_PATH))
+        sources.append(dotenv_settings)
+        sources.append(file_secret_settings)
+        return tuple(sources)
 
     app_name: str = "OptionsAji Backend"
     log_level: str = "INFO"
