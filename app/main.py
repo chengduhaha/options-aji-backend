@@ -13,6 +13,7 @@ from app.api.routes.agent import router as agent_router
 from app.api.routes.analyst import router as analyst_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
+from app.api.routes.fusion import router as fusion_router
 from app.api.routes.portfolio import router as portfolio_router
 from app.api.routes.compat import router as compat_router
 from app.api.routes.discord_backfill import router as discord_backfill_router
@@ -131,6 +132,7 @@ def create_application() -> FastAPI:
     app.include_router(analyst_router)
     app.include_router(stock_enhanced_router)
     app.include_router(brief_router)
+    app.include_router(fusion_router)
     app.include_router(portfolio_router)
     app.include_router(watchlist_router)
 
