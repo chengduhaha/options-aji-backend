@@ -9,11 +9,18 @@ from typing import Any, Optional
 
 import yfinance as yf
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import distinct, select
+from sqlalchemy.orm import Session
 
 from app.analytics.earnings_depth import build_earnings_history
+from app.analytics.gex_history import record_gex_snapshot
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
+from app.analytics.options_chain_analysis import analysis_from_yfinance_rows, build_chain_analysis
+from app.analytics.unusual_v2 import score_snapshot_rows
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
+from app.db.models import OptionsSnapshotRow
+from app.db.session import db_session_dep
 from app.services.cache_service import TTL_HOT, cache_get, cache_set, key_stock_overview
 from app.tools.openbb_tools import build_default_toolkit
 
@@ -200,6 +207,81 @@ def stock_chain(
     return tk.get_option_chain_full(symbol, expiration=expiration)
 
 
+@router.get("/{symbol}/chain-analysis")
+def stock_chain_analysis(
+    symbol: str,
+    expiration: Optional[str] = Query(default=None, description="ISO date YYYY-MM-DD"),
+    db: Session = Depends(db_session_dep),
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> dict[str, object]:
+    """套利 / OI突增 / IV skew / bid-ask 流动性 — prefer DB snapshots, else yfinance chain."""
+    sym = symbol.strip().upper()
+    distinct_exps = db.execute(
+        select(distinct(OptionsSnapshotRow.expiration_date))
+        .where(OptionsSnapshotRow.underlying_ticker == sym)
+        .order_by(OptionsSnapshotRow.expiration_date)
+    ).scalars().all()
+    exp_list = sorted(
+        e.isoformat() if isinstance(e, dt.date) else str(e)
+        for e in distinct_exps
+        if e is not None
+    )
+
+    if exp_list:
+        exp_pick = expiration or exp_list[0]
+        try:
+            exp_d = dt.date.fromisoformat(str(exp_pick)[:10])
+        except ValueError:
+            return {"symbol": sym, "error": "invalid_expiration"}
+
+        rows = db.execute(
+            select(OptionsSnapshotRow).where(
+                OptionsSnapshotRow.underlying_ticker == sym,
+                OptionsSnapshotRow.expiration_date == exp_d,
+            )
+        ).scalars().all()
+        if rows:
+            calls = [
+                r
+                for r in rows
+                if r.contract_type is not None and str(r.contract_type).lower().startswith("c")
+            ]
+            puts = [
+                r
+                for r in rows
+                if r.contract_type is not None and str(r.contract_type).lower().startswith("p")
+            ]
+            merged = build_chain_analysis(
+                symbol=sym,
+                expiration_iso=str(exp_pick)[:10],
+                rows_call=calls,
+                rows_put=puts,
+            )
+            return {**merged, "source": "database_snapshots", "expirations": exp_list}
+
+    tk = build_default_toolkit()
+    ch = tk.get_option_chain_full(sym, expiration=expiration)
+    if not isinstance(ch, dict) or ch.get("error"):
+        return {"symbol": sym, "error": (ch.get("error") if isinstance(ch, dict) else "no_chain")}
+    exp_use = str(expiration or ch.get("expiration") or "").strip()
+    if not exp_use:
+        return {"symbol": sym, "error": "no_expiration"}
+    raw_spot = ch.get("underlyingPrice")
+    spot_fb = float(raw_spot) if isinstance(raw_spot, (int, float)) else None
+    merged = analysis_from_yfinance_rows(
+        symbol=sym,
+        expiration_iso=exp_use[:10],
+        calls=list(ch.get("calls") or []),
+        puts=list(ch.get("puts") or []),
+        underlying_price=spot_fb,
+    )
+    return {
+        **merged,
+        "source": "yfinance_chain",
+        "expirations": list(ch.get("expirations") or []),
+    }
+
+
 @router.get("/{symbol}/volatility")
 def stock_volatility(
     symbol: str,
@@ -316,13 +398,71 @@ def stock_unusual(
     return {"symbol": sym, "items": rows[:80]}
 
 
+@router.get("/{symbol}/unusual-v2")
+def stock_unusual_v2(
+    symbol: str,
+    min_score: int = Query(default=60, ge=0, le=100),
+    sort_by: str = Query(default="score"),
+    order: str = Query(default="desc"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(db_session_dep),
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> dict[str, object]:
+    """Multi-factor unusual score. Data: `options_snapshots` (PostgreSQL) synced from Massive API."""
+
+    sym = symbol.strip().upper()
+    if sort_by not in ("score", "estimated_flow", "volume", "strike"):
+        sort_by = "score"
+    descending = order.lower() != "asc"
+
+    rows = db.execute(
+        select(OptionsSnapshotRow)
+        .where(
+            OptionsSnapshotRow.underlying_ticker == sym,
+            OptionsSnapshotRow.day_volume >= 30,
+            OptionsSnapshotRow.open_interest >= 1,
+        )
+        .order_by(OptionsSnapshotRow.day_volume.desc())
+        .limit(5000)
+    ).scalars().all()
+    scored = score_snapshot_rows(rows, min_score=min_score)
+
+    def sort_key(rec: dict[str, object]) -> float:
+        if sort_by == "score":
+            return float(rec.get("score") or 0)
+        if sort_by == "estimated_flow":
+            return float(rec.get("estimatedFlowUsd") or 0)
+        if sort_by == "volume":
+            return float(rec.get("volume") or 0)
+        return float(rec.get("strike_price") or 0)
+
+    scored.sort(key=sort_key, reverse=descending)
+    total = len(scored)
+    start_idx = max((page - 1), 0) * page_size
+    page_rows = scored[start_idx : start_idx + page_size]
+    return {
+        "symbol": sym,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "sort_by": sort_by,
+        "order": "desc" if descending else "asc",
+        "items": page_rows,
+    }
+
+
 @router.get("/{symbol}/gex")
 def stock_gex(
     symbol: str,
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
+    sym = symbol.strip().upper()
     tk = build_default_toolkit()
-    return tk.get_gex(symbol.strip().upper())
+    out = tk.get_gex(sym)
+    if isinstance(out, dict) and isinstance(out.get("netGex"), (int, float)):
+        record_gex_snapshot(sym, out)
+    return out
 
 
 @router.get("/{symbol}/strategy-ideas")

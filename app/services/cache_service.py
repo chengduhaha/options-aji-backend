@@ -47,6 +47,11 @@ def _get_client():
         return None
 
 
+def redis_client_optional() -> Optional[Any]:
+    """Shared Redis sync client if configured and healthy; otherwise None."""
+    return _get_client()
+
+
 # TTL tiers (seconds)
 TTL_HOT = 900    # 15 min — options snapshots, live quotes
 TTL_WARM = 1800  # 30 min — news, ratings

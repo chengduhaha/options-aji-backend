@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+# 可选：单文件本地配置（复制 settings.example.toml）
+settings.toml
 *.pyc
 *.pyo
 *.pyd

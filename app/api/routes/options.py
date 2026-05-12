@@ -17,6 +17,8 @@ from app.services.cache_service import (
     key_options_chain, key_gex,
 )
 from app.analytics.gex_compute import compute_gex_profile
+from app.analytics.gex_history import record_gex_snapshot
+from app.analytics.unusual_v2 import score_snapshot_rows
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/options", tags=["options"])
@@ -145,7 +147,25 @@ def get_gex(symbol: str):
     result = compute_gex_profile(sym)
     if not result.get("error"):
         cache_set(key_gex(sym), result, ttl=TTL_HOT)
+        record_gex_snapshot(sym, dict(result))
     return result
+
+
+@router.get("/gex/history/{symbol}")
+def get_gex_history_endpoint(
+    symbol: str,
+    days: int = Query(120, ge=10, le=400),
+):
+    """Sparse GEX points from Redis snapshots + Yahoo daily closes."""
+
+    sym = symbol.upper()
+    from app.analytics.gex_history import list_gex_history, seed_price_closes
+
+    return {
+        "symbol": sym,
+        "gexSeries": list_gex_history(sym, limit_days=days),
+        "priceCloses": seed_price_closes(sym, days=max(days, 60)),
+    }
 
 
 @router.get("/unusual")
@@ -192,6 +212,54 @@ def get_unusual_options(
             "underlying_price": r.underlying_price,
         })
     return {"contracts": result, "count": len(result)}
+
+
+@router.get("/unusual-v2")
+def unusual_options_v2_global(
+    symbol: Optional[str] = Query(None, description="Filter by underlying; omit for all"),
+    min_score: int = Query(60, ge=0, le=100),
+    sort_by: str = Query("score"),
+    order: str = Query("desc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    volume_min: int = Query(40, ge=0),
+    db: Session = Depends(db_session_dep),
+):
+    """Unusual scans `options_snapshots` in Postgres — synced from Massive (not FMP)."""
+
+    if sort_by not in ("score", "estimated_flow", "volume", "strike"):
+        sort_by = "score"
+    descending = order.lower() != "asc"
+    filt = (
+        OptionsSnapshotRow.day_volume >= volume_min,
+        OptionsSnapshotRow.open_interest >= 1,
+    )
+    q = select(OptionsSnapshotRow).where(and_(*filt))
+    if symbol and symbol.strip():
+        q = q.where(OptionsSnapshotRow.underlying_ticker == symbol.strip().upper())
+    q = q.order_by(OptionsSnapshotRow.day_volume.desc()).limit(8000)
+    rows = db.execute(q).scalars().all()
+    scored = score_snapshot_rows(rows, min_score=min_score)
+
+    def sort_key(rec: dict[str, object]) -> float:
+        if sort_by == "score":
+            return float(rec.get("score") or 0)
+        if sort_by == "estimated_flow":
+            return float(rec.get("estimatedFlowUsd") or 0)
+        if sort_by == "volume":
+            return float(rec.get("volume") or 0)
+        return float(rec.get("strike_price") or 0)
+
+    scored.sort(key=sort_key, reverse=descending)
+    total = len(scored)
+    start_idx = max((page - 1), 0) * page_size
+    return {
+        "symbol_filter": symbol.strip().upper() if symbol else None,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": scored[start_idx : start_idx + page_size],
+    }
 
 
 @router.get("/bars/{ticker}")

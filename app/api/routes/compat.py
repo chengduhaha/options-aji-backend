@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from app.analytics.gex_history import record_gex_snapshot
 from app.tools.openbb_tools import build_default_toolkit
 
 router = APIRouter(tags=["compat"])
@@ -43,4 +44,7 @@ def gex_dashboard(symbol: str):
         )
     out = dict(blob)
     out.pop("available", None)
+    sym = symbol.strip().upper()
+    if isinstance(out.get("netGex"), (int, float)):
+        record_gex_snapshot(sym, out)
     return out
