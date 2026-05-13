@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from app.db.models import Base
+from app.db.models_user import UserRow  # noqa: F401
 from app.db.session import engine
 
 logger = logging.getLogger(__name__)

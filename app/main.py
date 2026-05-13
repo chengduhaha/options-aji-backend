@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.agent import router as agent_router
 from app.api.routes.analyst import router as analyst_router
+from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
 from app.api.routes.fusion import router as fusion_router
@@ -111,6 +112,7 @@ def create_application() -> FastAPI:
 
     # ── Core (preserved from v1) ──
     app.include_router(health_router)
+    app.include_router(auth_router)
     app.include_router(billing_router)
     app.include_router(compat_router)
     app.include_router(agent_router)

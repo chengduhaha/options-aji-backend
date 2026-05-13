@@ -47,6 +47,11 @@ dependencies = [
   # Billing
   "stripe>=11.0.0",
 
+  # Auth (JWT + passwords; bcrypt direct — passlib breaks on bcrypt>=4.1 detect_wrap_bug)
+  "python-jose[cryptography]>=3.3.0",
+  "bcrypt>=4.0.1",
+  "email-validator>=2.1.0",
+
   # Utilities
   "lxml>=5.0.0",
   "python-dateutil>=2.9.0",

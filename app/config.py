@@ -116,6 +116,15 @@ class Settings(BaseSettings):
     stripe_portal_return_url: str = "http://localhost:3000/settings?billing=portal"
     free_tier_daily_agent_queries: int = 20
 
+    # ── JWT user auth ───────────────────────────────────────────────────────────
+    jwt_secret_key: str = ""
+    jwt_expire_hours: int = 24
+    # Comma-separated emails that receive role "admin" on registration.
+    auth_admin_emails: str = ""
+    auth_register_rate_limit_enabled: bool = True
+    auth_register_max_per_hour: int = 10
+    auth_register_window_seconds: int = 3600
+
     # ── Access control ────────────────────────────────────────────────────────
     subscription_tokens: str = ""
     subscription_required: bool = False
