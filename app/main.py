@@ -1,4 +1,4 @@
-"""Application entry — v2 with PostgreSQL + Redis + data sync scheduler."""
+"""Application entry — v3 with PostgreSQL + Redis + data sync scheduler."""
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +17,9 @@ from app.api.routes.alerts import router as alerts_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
+from app.api.routes.congress import router as congress_router
+from app.api.routes.dark_pool import router as dark_pool_router
+from app.api.routes.divergence import router as divergence_router
 from app.api.routes.earnings_symbol import router as earnings_symbol_router
 from app.api.routes.feed_ai import router as feed_ai_router
 from app.api.routes.feed_unified import router as feed_unified_router
@@ -28,6 +31,7 @@ from app.api.routes.profile import router as profile_router
 from app.api.routes.scanner import router as scanner_router
 from app.api.routes.social import router as social_router
 from app.api.routes.stock_detail import router as stock_detail_router
+from app.api.routes.stock_sentiment import router as stock_sentiment_router
 from app.api.routes.strategy_eval import router as strategy_eval_router
 from app.api.schemas.response import ApiError, ApiFailure
 from app.config import get_settings
@@ -59,20 +63,16 @@ def _startup_discord_listener() -> None:
 async def lifespan(app: FastAPI):  # noqa: ARG001
     cfg = get_settings()
 
-    # Ensure data directory exists (for SQLite fallback)
     Path("./data").mkdir(parents=True, exist_ok=True)
 
-    # Initialize DB tables
     init_db()
 
-    # Start Discord ingest (optional)
     _startup_discord_listener()
     if cfg.discord_gap_sync_enabled:
         asyncio.create_task(run_discord_gap_sync_loop())
     if cfg.feed_enrichment_enabled:
         asyncio.create_task(run_feed_enrichment_loop())
 
-    # Start data sync scheduler
     start_scheduler()
 
     yield
@@ -95,7 +95,7 @@ def create_application() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
@@ -175,7 +175,7 @@ def create_application() -> FastAPI:
         )
         return JSONResponse(status_code=500, content=payload.model_dump())
 
-    # ── Core 2.0 routes ──
+    # ── Core routes ──
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(billing_router)
@@ -193,6 +193,11 @@ def create_application() -> FastAPI:
     app.include_router(feed_unified_router)
     app.include_router(feed_ai_router)
     app.include_router(brief_router)
+    # ── V3 Alternative Data routes ──
+    app.include_router(divergence_router)
+    app.include_router(dark_pool_router)
+    app.include_router(congress_router)
+    app.include_router(stock_sentiment_router)
 
     return app
 
