@@ -94,7 +94,7 @@ class OptionsContractRow(Base):
 
     ticker: Mapped[str] = mapped_column(String(64), primary_key=True)
     underlying_ticker: Mapped[str] = mapped_column(String(16), nullable=False)
-    contract_type: Mapped[str] = mapped_column(String(8), nullable=False)  # call/put
+    contract_type: Mapped[str] = mapped_column(String(8), nullable=False)
     exercise_style: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     expiration_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
     strike_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -165,20 +165,17 @@ class OptionsSnapshotRow(Base):
     contract_type: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     expiration_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
     strike_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    # Greeks
     delta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     gamma: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     theta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     vega: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     implied_volatility: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     open_interest: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Quote
     bid: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ask: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bid_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ask_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     midpoint: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    # Day bar
     day_open: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     day_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     day_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -227,7 +224,7 @@ class EarningsCalendarRow(Base):
     revenue_estimate: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     revenue_actual: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     surprise_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    time: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)  # BMO/AMC
+    time: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     is_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -353,7 +350,7 @@ class SocialPostRow(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source: Mapped[str] = mapped_column(String(16), nullable=False)  # reddit | twitter
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
     external_id: Mapped[str] = mapped_column(String(128), nullable=False)
     author: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -454,4 +451,91 @@ class UserScannerTemplateRow(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+# ─── V3 Alternative Data ──────────────────────────────────────────────────────
+
+class RetailInsiderDivergenceRow(Base):
+    """Cached divergence scan results — retail FOMO vs insider sales."""
+    __tablename__ = "retail_insider_divergence"
+    __table_args__ = (
+        Index("idx_rid_symbol_time", "symbol", "scanned_at"),
+        Index("idx_rid_alert", "alert_level", "scanned_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    social_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mention_growth_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    insider_sell_usd: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    divergence_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    alert_level: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    ai_narrative_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    insider_trades_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    scanned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class DarkPoolTradeRow(Base):
+    """Dark pool block trades (FINRA TRF / OTC)."""
+    __tablename__ = "dark_pool_trades"
+    __table_args__ = (
+        Index("idx_dpt_symbol_time", "symbol", "trade_time"),
+        Index("idx_dpt_time", "trade_time"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    trade_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    notional_value: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    direction: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    exchange: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class MarketTideDailyRow(Base):
+    """Daily options market tide — call vs put premium flow."""
+    __tablename__ = "market_tide_daily"
+
+    trade_date: Mapped[datetime] = mapped_column(Date, primary_key=True)
+    call_premium_total: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    put_premium_total: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    net_call_flow: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    call_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    put_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    put_call_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tide_direction: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CongressTradeRow(Base):
+    """US Congress member trade disclosures (STOCK Act)."""
+    __tablename__ = "congress_trades"
+    __table_args__ = (
+        Index("idx_ct_member_symbol", "member_name", "symbol"),
+        Index("idx_ct_symbol_date", "symbol", "trade_date"),
+        Index("idx_ct_trade_date", "trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    member_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    chamber: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    trade_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    transaction_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    amount_range: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    asset_description: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
