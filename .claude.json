@@ -1,0 +1,33 @@
+{
+  "numStartups": 1,
+  "tipsHistory": {
+    "new-user-warmup": 1
+  },
+  "firstStartTime": "2026-05-10T01:47:01.901Z",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "seenNotifications": {},
+  "migrationVersion": 13,
+  "userID": "db3ee5e02771dd51cb270234a99b466948738f928448264b6b1d26b71aa3907e",
+  "changelogLastFetched": 1778377623038,
+  "shiftEnterKeyBindingInstalled": true,
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.1.138",
+  "projects": {
+    "/root/workspace": {
+      "allowedTools": [],
+      "mcpContextUris": [],
+      "mcpServers": {},
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true,
+      "projectOnboardingSeenCount": 1,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false,
+      "lastGracefulShutdown": false
+    }
+  },
+  "lastReleaseNotesSeen": "2.1.138",
+  "officialMarketplaceAutoInstallAttempted": true,
+  "officialMarketplaceAutoInstalled": true
+}

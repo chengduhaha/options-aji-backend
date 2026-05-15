@@ -3,40 +3,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes.agent import router as agent_router
-from app.api.routes.analyst import router as analyst_router
+from app.api.routes.alerts import router as alerts_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
-from app.api.routes.fusion import router as fusion_router
-from app.api.routes.portfolio import router as portfolio_router
-from app.api.routes.compat import router as compat_router
-from app.api.routes.discord_backfill import router as discord_backfill_router
-from app.api.routes.earnings_view import router as earnings_view_router
-from app.api.routes.etf import router as etf_router
-from app.api.routes.events import router as events_router
+from app.api.routes.earnings_symbol import router as earnings_symbol_router
 from app.api.routes.feed_ai import router as feed_ai_router
 from app.api.routes.feed_unified import router as feed_unified_router
 from app.api.routes.health import router as health_router
 from app.api.routes.integration_status import router as integration_router
-from app.api.routes.macro import router as macro_router
 from app.api.routes.market_dashboard import router as market_dashboard_router
-from app.api.routes.market_overview import router as market_overview_router
-from app.api.routes.messages import router as messages_router
-from app.api.routes.news import router as news_router
 from app.api.routes.options import router as options_router
+from app.api.routes.profile import router as profile_router
 from app.api.routes.scanner import router as scanner_router
-from app.api.routes.signals_feed import router as signals_feed_router
+from app.api.routes.social import router as social_router
 from app.api.routes.stock_detail import router as stock_detail_router
-from app.api.routes.stock_enhanced import router as stock_enhanced_router
 from app.api.routes.strategy_eval import router as strategy_eval_router
-from app.api.routes.watchlist import router as watchlist_router
+from app.api.schemas.response import ApiError, ApiFailure
 from app.config import get_settings
 from app.db.bootstrap import init_db
 from app.ingest.discord_bot import parse_channel_ids, run_discord_ingest_forever
@@ -93,6 +86,12 @@ def create_application() -> FastAPI:
     cors_raw = settings.cors_origins.strip()
     if cors_raw and cors_raw != "*":
         origins = [o.strip() for o in cors_raw.split(",") if o.strip()] or origins
+    allow_credentials = bool(settings.cors_allow_credentials)
+    if allow_credentials and "*" in origins:
+        logger.warning(
+            "CORS misconfiguration: allow_credentials=True with wildcard origin; forcing allow_credentials=False."
+        )
+        allow_credentials = False
 
     app = FastAPI(
         title=settings.app_name,
@@ -105,42 +104,95 @@ def create_application() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # ── Core (preserved from v1) ──
+    @app.middleware("http")
+    async def request_observability_middleware(request: Request, call_next):
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        started = asyncio.get_running_loop().time()
+        response = await call_next(request)
+        elapsed_ms = int((asyncio.get_running_loop().time() - started) * 1000)
+        response.headers["x-request-id"] = request_id
+        logger.info(
+            "request_id=%s method=%s path=%s status=%s elapsed_ms=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        code = "http_error"
+        if isinstance(exc.detail, str) and exc.detail.strip():
+            message = exc.detail
+        else:
+            message = "Request failed."
+        payload = ApiFailure(
+            error=ApiError(
+                code=code,
+                message=message,
+                details={"status_code": exc.status_code},
+                request_id=request_id,
+            ),
+        )
+        return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        payload = ApiFailure(
+            error=ApiError(
+                code="validation_error",
+                message="Invalid request payload.",
+                details={"errors": exc.errors()},
+                request_id=request_id,
+            ),
+        )
+        return JSONResponse(status_code=422, content=payload.model_dump())
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        logger.exception("Unhandled server error request_id=%s", request_id, exc_info=exc)
+        payload = ApiFailure(
+            error=ApiError(
+                code="internal_error",
+                message="Internal server error.",
+                details={"type": type(exc).__name__},
+                request_id=request_id,
+            ),
+        )
+        return JSONResponse(status_code=500, content=payload.model_dump())
+
+    # ── Core 2.0 routes ──
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(billing_router)
-    app.include_router(compat_router)
     app.include_router(agent_router)
-    app.include_router(messages_router)
+    app.include_router(alerts_router)
     app.include_router(integration_router)
     app.include_router(market_dashboard_router)
     app.include_router(stock_detail_router)
+    app.include_router(options_router)
+    app.include_router(profile_router)
+    app.include_router(earnings_symbol_router)
     app.include_router(scanner_router)
+    app.include_router(social_router)
     app.include_router(strategy_eval_router)
     app.include_router(feed_unified_router)
     app.include_router(feed_ai_router)
-    app.include_router(signals_feed_router)
-    app.include_router(discord_backfill_router)
-    app.include_router(events_router)
-
-    # ── New v2 routes ──
-    app.include_router(options_router)
-    app.include_router(market_overview_router)
-    app.include_router(macro_router)
-    app.include_router(etf_router)
-    app.include_router(news_router)
-    app.include_router(earnings_view_router)
-    app.include_router(analyst_router)
-    app.include_router(stock_enhanced_router)
     app.include_router(brief_router)
-    app.include_router(fusion_router)
-    app.include_router(portfolio_router)
-    app.include_router(watchlist_router)
 
     return app
 

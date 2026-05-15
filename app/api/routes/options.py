@@ -1,13 +1,17 @@
 """Options API routes — chain, snapshots, GEX, unusual activity."""
 from __future__ import annotations
 
+import math
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
+from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
+from app.analytics.options_pricing import StrategyLegIn, evaluate_multi_leg
 from app.db.session import db_session_dep
 from app.clients.massive_client import get_massive_client
 from app.config import get_settings
@@ -19,6 +23,7 @@ from app.services.cache_service import (
 from app.analytics.gex_compute import compute_gex_profile
 from app.analytics.gex_history import record_gex_snapshot
 from app.analytics.unusual_v2 import score_snapshot_rows
+from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/options", tags=["options"])
@@ -121,6 +126,89 @@ def get_options_chain(
             logger.warning("Live options chain failed for %s: %s", sym, exc)
 
     return {"symbol": sym, "contracts": [], "error": "no_data"}
+
+
+@router.get("/iv/{symbol}")
+def get_iv_analysis(symbol: str) -> dict[str, object]:
+    """Return volatility analytics for a symbol (IV rank/proxy, skew, term)."""
+    sym = symbol.strip().upper()
+    if not sym:
+        return {"error": "empty_symbol"}
+
+    tk = build_default_toolkit()
+    bar = tk.frontend_market_bar(sym)
+    hv_series, hv_meta = hv_series_and_current(sym)
+    atm_iv = bar.get("atmIv")
+    hv_vals = [v for _, v in hv_series]
+    rank_est, pct_est, note = iv_rank_percentile_proxy(
+        current_iv_pct=float(atm_iv) if isinstance(atm_iv, (int, float)) else 0.0,
+        hv_series_pct=hv_vals,
+    )
+
+    term: list[dict[str, object]] = []
+    try:
+        chain = tk.get_option_chain_full(sym)
+        expirations = list(chain.get("expirations") or []) if isinstance(chain, dict) else []
+        calls = list(chain.get("calls") or []) if isinstance(chain, dict) else []
+        spot_val = chain.get("underlyingPrice") if isinstance(chain, dict) else None
+        spot = float(spot_val) if isinstance(spot_val, (int, float)) else 0.0
+        for exp in expirations[:8]:
+            exp_str = str(exp)
+            exp_chain = tk.get_option_chain_full(sym, expiration=exp_str)
+            exp_calls = list(exp_chain.get("calls") or []) if isinstance(exp_chain, dict) else []
+            if not exp_calls:
+                continue
+            if spot <= 0:
+                strike0 = exp_calls[0].get("strike")
+                if isinstance(strike0, (int, float)):
+                    spot = float(strike0)
+            best = None
+            best_dist = float("inf")
+            for rec in exp_calls:
+                strike = rec.get("strike")
+                iv = rec.get("impliedVolatility")
+                if not isinstance(strike, (int, float)) or not isinstance(iv, (int, float)):
+                    continue
+                if iv <= 0:
+                    continue
+                dist = abs(float(strike) - spot)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = float(iv) * 100.0
+            term.append({"expiration": exp_str, "atmIvPct": round(best, 4) if best is not None else None})
+    except Exception as exc:
+        logger.warning("iv term structure failed symbol=%s err=%s", sym, exc)
+
+    skew: list[dict[str, object]] = []
+    try:
+        ch = tk.get_option_chain_full(sym)
+        calls = ch.get("calls") or []
+        if isinstance(calls, list):
+            for rec in calls:
+                if not isinstance(rec, dict):
+                    continue
+                strike = rec.get("strike")
+                iv = rec.get("impliedVolatility")
+                if not isinstance(strike, (int, float)) or not isinstance(iv, (int, float)):
+                    continue
+                if math.isnan(float(iv)) or float(iv) <= 0:
+                    continue
+                skew.append({"strike": float(strike), "ivPct": round(float(iv) * 100.0, 4)})
+            skew.sort(key=lambda x: float(x["strike"]))
+    except Exception as exc:
+        logger.warning("iv skew failed symbol=%s err=%s", sym, exc)
+
+    return {
+        "symbol": sym,
+        "atmIvPct": atm_iv,
+        "ivRank": rank_est,
+        "ivPercentile": pct_est,
+        "methodology": note,
+        "hvMeta": hv_meta,
+        "hvSeries": [{"date": d, "hv20": v} for d, v in hv_series[-260:]],
+        "termStructure": term,
+        "skew": skew[:80],
+    }
 
 
 @router.get("/expirations/{symbol}")
@@ -260,6 +348,54 @@ def unusual_options_v2_global(
         "page_size": page_size,
         "items": scored[start_idx : start_idx + page_size],
     }
+
+
+class StrategyLeg(BaseModel):
+    side: str = Field(pattern="^(buy|sell)$")
+    option_type: str = Field(pattern="^(call|put)$")
+    strike: float = Field(gt=0)
+    premium: float = Field(ge=0)
+    contracts: int = Field(default=1, ge=1, le=10000)
+    days_to_expiry: float = Field(default=30.0, ge=0.01, le=3650.0)
+    iv: float = Field(default=0.35, ge=0.01, le=5.0)
+
+
+class StrategyEvaluateRequest(BaseModel):
+    symbol: str
+    spot: float = Field(gt=0)
+    risk_free_rate: float = Field(default=0.0525, ge=0.0, le=0.2)
+    legs: list[StrategyLeg] = Field(min_length=1)
+    spot_grid_pct: list[float] = Field(
+        default_factory=lambda: [-25, -15, -10, -5, 0, 5, 10, 15, 25],
+    )
+
+
+@router.post("/strategy")
+def evaluate_strategy_v2(body: StrategyEvaluateRequest) -> dict[str, object]:
+    """Evaluate option strategy under 2.0 API namespace."""
+    sym = body.symbol.strip().upper()
+    legs_in: list[StrategyLegIn] = [
+        StrategyLegIn(
+            side=leg.side,
+            option_type=leg.option_type,
+            strike=float(leg.strike),
+            premium=float(leg.premium),
+            contracts=int(leg.contracts),
+            days_to_expiry=float(leg.days_to_expiry),
+            iv=float(leg.iv),
+        )
+        for leg in body.legs
+    ]
+    try:
+        out = evaluate_multi_leg(
+            spot=float(body.spot),
+            risk_free=float(body.risk_free_rate),
+            legs=legs_in,
+            spot_moves_pct=[float(x) for x in body.spot_grid_pct],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"symbol": sym, **out}
 
 
 @router.get("/bars/{ticker}")

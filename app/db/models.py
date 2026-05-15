@@ -340,3 +340,118 @@ class WatchlistRow(Base):
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+# ─── Social / Resonance ───────────────────────────────────────────────────────
+
+class SocialPostRow(Base):
+    __tablename__ = "social_posts"
+    __table_args__ = (
+        Index("idx_social_posts_created", "created_at"),
+        Index("idx_social_posts_source", "source"),
+        Index("uq_social_posts_source_external", "source", "external_id", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)  # reddit | twitter
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    author: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    comments_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    tickers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class TickerSentimentSnapshotRow(Base):
+    __tablename__ = "ticker_sentiment_snapshots"
+    __table_args__ = (
+        Index("idx_ticker_sentiment_symbol_time", "symbol", "snapshot_time"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    snapshot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sentiment_score: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    mention_count_24h: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mention_growth_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source_breakdown: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ResonanceSignalRow(Base):
+    __tablename__ = "resonance_signals"
+    __table_args__ = (Index("idx_resonance_symbol_triggered", "symbol", "triggered_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(32), nullable=False, default="resonance")
+    institutional_direction: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    retail_direction: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    institutional_strength: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retail_strength: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    narrative_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserAlertRow(Base):
+    __tablename__ = "user_alerts"
+    __table_args__ = (Index("idx_user_alerts_api_key_symbol", "api_key", "symbol"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    alert_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    config_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserPushSettingRow(Base):
+    __tablename__ = "user_push_settings"
+    __table_args__ = (Index("idx_user_push_settings_api_key", "api_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    push_discord: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    push_telegram: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    push_email: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    keywords: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class UserScannerTemplateRow(Base):
+    __tablename__ = "user_scanner_templates"
+    __table_args__ = (
+        Index("idx_user_scanner_templates_api_key", "api_key"),
+        Index("idx_user_scanner_templates_api_key_name", "api_key", "name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    config_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

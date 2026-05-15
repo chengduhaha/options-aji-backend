@@ -63,6 +63,7 @@ def start_scheduler() -> None:
         sync_news_pipeline,
         sync_analyst_ratings_pipeline,
     )
+    from app.services.social_sentiment import ingest_all_social_pipelines
 
     # ── Every 15 min during market hours ──────────────────────────────────────────────
     _scheduler.add_job(
@@ -93,6 +94,11 @@ def start_scheduler() -> None:
         lambda: _run_safe(sync_news_pipeline, "news"),
         IntervalTrigger(minutes=10),
         id="news", replace_existing=True, max_instances=1,
+    )
+    _scheduler.add_job(
+        lambda: _run_safe(ingest_all_social_pipelines, "social_sentiment"),
+        IntervalTrigger(minutes=10),
+        id="social_sentiment", replace_existing=True, max_instances=1,
     )
 
     # ── Daily 6:30 AM ET (pre-market) ───────────────────────────────────────────────

@@ -1,0 +1,46 @@
+# 复制本文件为 settings.toml（与 app/ 同级）。settings.toml 已在 .gitignore，勿提交密钥。
+# 优先级（从高到低）：进程环境变量 > settings.toml > .env > config.py 中的默认值
+#
+# 若已与 .env 同时使用：同名键以 settings.toml 为准（.env 中重复项可删掉以免混淆）。
+
+app_name = "OptionsAji Backend"
+log_level = "INFO"
+
+# 建议：database_url / redis_url 仅放在 .env，避免本文件中的占位符覆盖真实密码。
+# 若全部迁入本文件，请删除 .env 中同名项或确保此处为生产真实值。
+
+massive_api_key = ""
+massive_base_url = "https://api.massive.com"
+massive_ws_url = "wss://delayed.massive.com/options"
+
+fmp_api_key = ""
+fmp_base_url = "https://financialmodelingprep.com/stable"
+
+openrouter_api_key = ""
+openrouter_base_url = "https://openrouter.ai/api/v1"
+model_parse = "deepseek/deepseek-chat"
+model_synthesis = "deepseek/deepseek-chat"
+
+discord_bot_token = ""
+discord_channel_ids = ""
+discord_event_channel_ids = ""
+enable_discord_listener = false
+
+sync_watchlist = "SPY,QQQ,AAPL,MSFT,NVDA,TSLA,AMZN,META,GOOGL,AMD"
+sync_enabled = true
+
+cors_origins = "https://options-aji.vercel.app,http://localhost:3000"
+
+# ── JWT 用户登录（建议用环境变量 JWT_SECRET_KEY，勿提交真实密钥） ──
+# jwt_secret_key = ""
+# jwt_expire_hours = 24
+# auth_admin_emails = ""
+
+gex_backend_url = ""
+gex_backend_headers = ""
+
+xpoz_api_key = ""
+xpoz_base_url = "https://api.xpoz.ai/v1"
+xpoz_retry_max = 2
+xpoz_retry_backoff_seconds = 0.5
+xpoz_circuit_breaker_seconds = 120

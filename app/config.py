@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     auth_register_rate_limit_enabled: bool = True
     auth_register_max_per_hour: int = 10
     auth_register_window_seconds: int = 3600
+    auth_verification_code_ttl_seconds: int = 900
+    auth_verification_max_attempts: int = 5
+    auth_verification_debug_expose_code: bool = False
 
     # ── Access control ────────────────────────────────────────────────────────
     subscription_tokens: str = ""
@@ -132,10 +135,16 @@ class Settings(BaseSettings):
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     cors_origins: str = "*"
+    cors_allow_credentials: bool = True
 
     # ── Misc ─────────────────────────────────────────────────────────────────
     openbb_api_key: str = ""
     twitter_api_io_key: str = ""
+    xpoz_api_key: str = ""
+    xpoz_base_url: str = "https://api.xpoz.ai/v1"
+    xpoz_retry_max: int = 2
+    xpoz_retry_backoff_seconds: float = 0.5
+    xpoz_circuit_breaker_seconds: int = 120
     macro_feed_cache_seconds: int = 900
     cboe_equity_pc_cache_seconds: int = 3600
     cboe_equity_pc_csv_url: str = (
@@ -148,6 +157,12 @@ class Settings(BaseSettings):
     agent_discord_context_limit: int = 18
     integration_status_public: bool = True
     suppress_noisy_provider_logs: bool = True
+    feature_social_enabled: bool = True
+    #: Comma-separated Twitter/X handles (no @) for KOL timeline ingest via xpoz
+    social_kol_handles: str = (
+        "unusual_whales,OptionsHawk,SqueezeMetrics,CBOE,DeItaone,gurgavin"
+    )
+    feature_deep_agent_enabled: bool = True
 
     @property
     def sync_watchlist_symbols(self) -> list[str]:

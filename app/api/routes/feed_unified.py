@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import bearer_subscription_optional
 from app.api.routes.signals_feed import SignalCard, signals_feed
-from app.db.models import StockNewsRow
+from app.db.models import SocialPostRow, StockNewsRow
 from app.db.session import db_session_dep
 from app.ingest.intel_macro import (
     fetch_macro_calendar_rows,
@@ -20,10 +20,16 @@ from app.ingest.intel_macro import (
     macro_row_timestamp_iso,
 )
 from app.ingest.message_store import list_discord_feed_rows
+from app.services.resonance_feed import resonance_stream_to_feed_fields, social_row_matches_kol_filter
+from app.services.social_sentiment import (
+    ResonanceStreamItem,
+    kol_handle_set_from_settings,
+    list_resonance_timeline,
+)
 
 router = APIRouter(tags=["feed"])
 
-FeedKind = Literal["signal", "discord", "macro", "twitter", "news"]
+FeedKind = Literal["signal", "discord", "macro", "twitter", "news", "resonance"]
 
 
 class FeedItem(BaseModel):
@@ -45,6 +51,20 @@ class FeedItem(BaseModel):
 class FeedEnvelope(BaseModel):
     generated_at_utc: str
     items: list[FeedItem]
+
+
+def _feed_item_from_resonance_row(ritem: ResonanceStreamItem) -> FeedItem:
+    f = resonance_stream_to_feed_fields(ritem)
+    return FeedItem(
+        id=f.id,
+        kind="resonance",
+        created_at_utc=f.created_at_utc,
+        title=f.title,
+        body=f.body,
+        tickers=list(f.tickers),
+        sentiment=f.sentiment,
+        priority=f.priority,
+    )
 
 
 def _discord_feed_item(
@@ -97,12 +117,16 @@ def _discord_feed_item(
 def unified_feed(
     kind: Optional[str] = Query(
         default=None,
-        description="Filter: signal | discord | macro | twitter | all (default)",
+        description="Filter: signal | discord | macro | twitter | resonance | all (default)",
     ),
     ticker: Optional[str] = Query(default=None),
     hours: int = Query(default=72, ge=1, le=24 * 30),
     limit_signals: int = Query(default=40, ge=1, le=200),
     limit_discord: int = Query(default=40, ge=1, le=200),
+    kol_only: bool = Query(
+        default=False,
+        description="When true, only include social posts from configured KOL handles.",
+    ),
     session: Session = Depends(db_session_dep),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> FeedEnvelope:
@@ -111,7 +135,9 @@ def unified_feed(
     want_discord = kind in (None, "all", "discord")
     want_macro = kind in (None, "all", "macro")
     want_twitter = kind in (None, "all", "twitter")
+    want_resonance = kind in (None, "all", "resonance")
 
+    kol_set = kol_handle_set_from_settings()
     if want_signals:
         env = signals_feed(_)
         sigs: list[SignalCard] = env.signals[:limit_signals]
@@ -178,8 +204,40 @@ def unified_feed(
             )
 
     if want_twitter:
-        # 付费 X / 聚合源：配置 TWITTER_API_IO_KEY 后可接入；当前返回 0 条占位。
-        pass
+        social_rows = session.execute(
+            select(SocialPostRow).order_by(SocialPostRow.created_at.desc()).limit(120)
+        ).scalars().all()
+        for sr in social_rows:
+            if not social_row_matches_kol_filter(sr=sr, kol_only=kol_only, kol_set=kol_set):
+                continue
+            ticks = [str(t).strip().upper() for t in (sr.tickers or []) if t]
+            if ticker and ticker.strip().upper() not in ticks:
+                continue
+            created = sr.created_at.astimezone(timezone.utc).isoformat()
+            title = (sr.title or "").strip() or (sr.author or "Social")
+            body = ((sr.content or "").strip() or title)[:4000]
+            source_label = "X" if sr.source == "twitter" else "Reddit"
+            kol_badge = ""
+            raw = sr.raw_json if isinstance(sr.raw_json, dict) else {}
+            kh = str(raw.get("kol_handle") or "").strip()
+            if kh or bool(raw.get("kol_tracked")):
+                kol_badge = "[KOL] "
+            items.append(
+                FeedItem(
+                    id=f"social-{sr.source}-{sr.external_id}",
+                    kind="twitter",
+                    created_at_utc=created,
+                    title=f"{kol_badge}[{source_label}] {title[:480]}",
+                    body=body,
+                    tickers=ticks[:24],
+                    raw_body=sr.content,
+                )
+            )
+
+    if want_resonance:
+        res = list_resonance_timeline(limit=40, symbol=ticker)
+        for ritem in res.items:
+            items.append(_feed_item_from_resonance_row(ritem))
 
     items.sort(key=lambda x: x.created_at_utc, reverse=True)
     return FeedEnvelope(
@@ -191,7 +249,17 @@ def unified_feed(
 @router.get("/api/feed/unified")
 def unified_feed_timeline(
     ticker: Optional[str] = Query(default=None),
+    kind: Optional[str] = Query(
+        default=None,
+        description="Filter by kind: signal|discord|macro|news|twitter|resonance",
+    ),
+    sentiment: Optional[str] = Query(default=None, description="Filter sentiment: bullish|bearish|neutral"),
+    priority: Optional[str] = Query(default=None, description="Filter priority value"),
     limit: int = Query(default=50, ge=1, le=200),
+    kol_only: bool = Query(
+        default=False,
+        description="When true, only include social posts from configured KOL handles.",
+    ),
     before_timestamp: Optional[str] = Query(
         default=None,
         description="ISO timestamp — items strictly older than this (UTC).",
@@ -211,6 +279,11 @@ def unified_feed_timeline(
             cutoff = None
 
     tk_up = ticker.strip().upper() if ticker else ""
+    kind_filter = kind.strip().lower() if kind else ""
+    sentiment_filter = sentiment.strip().lower() if sentiment else ""
+    priority_filter = priority.strip().lower() if priority else ""
+
+    kol_set = kol_handle_set_from_settings()
 
     items: list[FeedItem] = []
 
@@ -303,6 +376,40 @@ def unified_feed_timeline(
             )
         )
 
+    social_rows = session.execute(
+        select(SocialPostRow).order_by(SocialPostRow.created_at.desc()).limit(200)
+    ).scalars().all()
+    for sr in social_rows:
+        if not social_row_matches_kol_filter(sr=sr, kol_only=kol_only, kol_set=kol_set):
+            continue
+        ticks = [str(t).strip().upper() for t in (sr.tickers or []) if t]
+        if tk_up and tk_up not in ticks:
+            continue
+        created = sr.created_at.astimezone(timezone.utc).isoformat()
+        source_label = "X" if sr.source == "twitter" else "Reddit"
+        title = (sr.title or "").strip() or (sr.author or source_label)
+        body = ((sr.content or "").strip() or title)[:4000]
+        raw = sr.raw_json if isinstance(sr.raw_json, dict) else {}
+        kh = str(raw.get("kol_handle") or "").strip()
+        kol_badge = ""
+        if kh or bool(raw.get("kol_tracked")):
+            kol_badge = "[KOL] "
+        items.append(
+            FeedItem(
+                id=f"social-{sr.source}-{sr.external_id}",
+                kind="twitter",
+                created_at_utc=created,
+                title=f"{kol_badge}[{source_label}] {title[:480]}",
+                body=body,
+                tickers=ticks[:24],
+                raw_body=sr.content,
+            )
+        )
+
+    res_block = list_resonance_timeline(limit=48, symbol=ticker)
+    for ritem in res_block.items:
+        items.append(_feed_item_from_resonance_row(ritem))
+
     if cutoff:
         cutoff_utc = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
         filtered_items: list[FeedItem] = []
@@ -319,6 +426,20 @@ def unified_feed_timeline(
         items = filtered_items
 
     items.sort(key=lambda x: x.created_at_utc, reverse=True)
+    if kind_filter:
+        items = [item for item in items if item.kind.lower() == kind_filter]
+    if sentiment_filter:
+        items = [
+            item
+            for item in items
+            if (item.sentiment or "").strip().lower() == sentiment_filter
+        ]
+    if priority_filter:
+        items = [
+            item
+            for item in items
+            if (item.priority or "").strip().lower() == priority_filter
+        ]
     items = items[:limit]
 
     return FeedEnvelope(

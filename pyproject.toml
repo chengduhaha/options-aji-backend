@@ -43,6 +43,7 @@ dependencies = [
   "langchain-openai>=0.2.0",
   "langchain-core>=0.3.0",
   "openai>=1.30.0",
+  "xpoz>=0.1.0",
 
   # Billing
   "stripe>=11.0.0",

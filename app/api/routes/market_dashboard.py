@@ -211,6 +211,28 @@ def market_overview(
     return payload
 
 
+@router.get("/{symbol}")
+def market_symbol(
+    symbol: str,
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> dict[str, object]:
+    """Single-symbol market snapshot for stock header usage."""
+    sym = symbol.strip().upper()
+    if not sym:
+        return {"error": "empty_symbol"}
+    if sym == "AI-SUMMARY":
+        ai = market_ai_summary(_)
+        return ai.model_dump()
+    toolkit = build_default_toolkit()
+    quote = toolkit.get_quote(sym)
+    bar = toolkit.frontend_market_bar(sym)
+    return {
+        "symbol": sym,
+        "quote": quote,
+        "bar": bar,
+    }
+
+
 def _scan_unusual_top(toolkit: OpenBBToolkit, *, limit: int) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for sym in WATCHLIST_MOVER:
