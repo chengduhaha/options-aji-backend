@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     futu_snapshot_batch_size: int = 200
     futu_cache_ttl_seconds: int = 3
     futu_connect_timeout_seconds: float = 0.3
+    futu_background_options_sync_enabled: bool = False
 
     # ── OpenRouter LLM ────────────────────────────────────────────────────────
     openrouter_api_key: str = ""

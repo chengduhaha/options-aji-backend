@@ -8,7 +8,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
-import yfinance as yf
+from app.clients.fmp_client import get_fmp_client
+from app.config import get_settings
+from app.tools.yf_helpers import yf_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,32 @@ def _scalar_int(v: Any) -> int:
     return int(f)
 
 
+def _quote_spot_from_fmp(symbol: str) -> Optional[float]:
+    if not get_settings().fmp_api_key.strip():
+        return None
+    try:
+        row = get_fmp_client().get_quote(symbol)
+    except Exception as exc:
+        logger.warning("compute_gex_profile fmp_quote(%s): %s", symbol, exc)
+        return None
+    if not isinstance(row, dict):
+        return None
+    for key in ("price", "last_price", "regularMarketPrice", "currentPrice"):
+        value = _scalar_float(row.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def _resolve_spot(symbol: str, yf_spot: float) -> tuple[float, str]:
+    quote_spot = _quote_spot_from_fmp(symbol)
+    if quote_spot is not None and quote_spot > 0:
+        return quote_spot, "fmp_quote"
+    if yf_spot > 0:
+        return yf_spot, "yfinance_fast_info"
+    return 0.0, "missing"
+
+
 @dataclass(frozen=True)
 class GexStrikeRow:
     strike: float
@@ -75,11 +103,12 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
         return {"symbol": "", "error": "empty_symbol"}
 
     try:
-        t = yf.Ticker(guard)
+        t = yf_ticker(guard)
         opts = list(t.options or [])
         qi = t.fast_info
         spot_raw = qi.get("last_price")
-        spot = float(spot_raw) if isinstance(spot_raw, (int, float)) and not (isinstance(spot_raw, float) and math.isnan(spot_raw)) else 0.0
+        yf_spot = float(spot_raw) if isinstance(spot_raw, (int, float)) and not (isinstance(spot_raw, float) and math.isnan(spot_raw)) else 0.0
+        spot, spot_source = _resolve_spot(guard, yf_spot)
     except Exception as exc:
         logger.warning("compute_gex_profile meta(%s): %s", guard, exc)
         return {"symbol": guard, "error": "ticker_failed"}
@@ -109,6 +138,7 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
     if spot <= 0 and not calls.empty and "strike" in calls.columns:
         mid = float(calls["strike"].median())
         spot = mid
+        spot_source = "strike_median_fallback"
 
     strike_map: dict[float, dict[str, float]] = {}
 
@@ -229,8 +259,135 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
         "strikes": strikes_out,
         "timestamp": ts,
         "underlyingPrice": round(spot, 2),
+        "spotSource": spot_source,
         "source": "yfinance_local_gamma_estimate",
     }
+
+
+def compute_gex_profile_from_contracts(
+    symbol: str,
+    *,
+    contracts: list[dict[str, Any]],
+    spot: float,
+    max_strikes: int = 45,
+) -> dict[str, object]:
+    """Estimate GEX from already-fetched realtime option contracts."""
+
+    guard = symbol.strip().upper()
+    if not guard:
+        return {"symbol": "", "error": "empty_symbol"}
+    if spot <= 0:
+        return {"symbol": guard, "error": "missing_spot"}
+    if not contracts:
+        return {"symbol": guard, "error": "no_option_chain"}
+
+    strike_map: dict[float, dict[str, float]] = {}
+    oi_map: dict[float, int] = {}
+    iv_map: dict[float, float] = {}
+    expiry: Optional[str] = None
+
+    for row in contracts:
+        side = str(row.get("contract_type") or "").lower()
+        if side not in ("call", "put"):
+            continue
+        strike = _scalar_float(row.get("strike_price"))
+        if strike is None or strike <= 0:
+            continue
+        oi = max(_scalar_int(row.get("open_interest")), 0)
+        gamma = _scalar_float(row.get("gamma"))
+        iv = _scalar_float(row.get("implied_volatility")) or 0.0
+        if gamma is None or gamma <= 0:
+            exp_raw = row.get("expiration_date")
+            t_years = 30 / 365.0
+            if isinstance(exp_raw, str) and len(exp_raw) >= 10:
+                try:
+                    exp_date = dt.date.fromisoformat(exp_raw[:10])
+                    t_years = max(_years_to_expiry(exp_date), 1 / 365.0)
+                except ValueError:
+                    pass
+            gamma = bs_gamma(spot=spot, strike=strike, t_years=t_years, iv=iv if iv > 0 else 0.35)
+        mag = abs(gamma) * oi * 100.0 * (spot**2) * 0.01 / 1e9
+        ent = strike_map.setdefault(strike, {"call": 0.0, "put": 0.0})
+        ent[side] += mag
+        oi_map[strike] = oi_map.get(strike, 0) + oi
+        if iv > 0:
+            iv_map[strike] = max(iv_map.get(strike, 0.0), iv * 100.0)
+        if expiry is None and row.get("expiration_date"):
+            expiry = str(row.get("expiration_date"))
+
+    if not strike_map:
+        return {"symbol": guard, "error": "no_strikes"}
+
+    strikes_sorted = sorted(strike_map.keys(), key=lambda s: abs(s - spot))
+    strikes_trimmed = sorted(strikes_sorted[:max_strikes])
+    rows = [
+        GexStrikeRow(
+            strike=float(k),
+            call_gex_bn=float(strike_map[k]["call"]),
+            put_gex_bn=float(strike_map[k]["put"]),
+            net_bn=float(strike_map[k]["call"] - strike_map[k]["put"]),
+            gamma=bs_gamma(spot=spot, strike=k, t_years=30 / 365.0, iv=(iv_map.get(k, 35.0) / 100.0)),
+            oi=int(oi_map.get(k, 0)),
+            iv=float(iv_map.get(k, 0.0)),
+        )
+        for k in strikes_trimmed
+    ]
+
+    net_total = sum(r.net_bn for r in rows)
+    call_wall = max(rows, key=lambda r: r.call_gex_bn).strike
+    put_wall = max(rows, key=lambda r: r.put_gex_bn).strike
+    gamma_flip = _gamma_flip_from_rows(rows, spot=spot)
+    max_pain = _max_pain_from_gex_rows(rows)
+    regime = "Positive Gamma" if net_total >= 0 else "Negative Gamma"
+    ts = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    return {
+        "symbol": guard,
+        "expiration": expiry or "",
+        "netGex": round(net_total, 4),
+        "callWall": round(call_wall, 2),
+        "putWall": round(put_wall, 2),
+        "gammaFlip": round(gamma_flip, 2),
+        "maxPain": round(max_pain, 2),
+        "regime": regime,
+        "strikes": [
+            {
+                "strike": round(r.strike, 2),
+                "callGex": round(r.call_gex_bn, 4),
+                "putGex": round(r.put_gex_bn, 4),
+                "net": round(r.net_bn, 4),
+                "gamma": round(r.gamma, 6),
+                "oi": int(r.oi),
+                "iv": round(r.iv, 4),
+            }
+            for r in sorted(rows, key=lambda x: x.strike)
+        ],
+        "timestamp": ts,
+        "underlyingPrice": round(spot, 2),
+        "spotSource": "futu_quote",
+        "source": "futu_realtime_gamma_estimate",
+    }
+
+
+def _gamma_flip_from_rows(rows: list[GexStrikeRow], *, spot: float) -> float:
+    cum = 0.0
+    gamma_flip = float(spot)
+    prev_s: Optional[float] = None
+    prev_cum: Optional[float] = None
+    for r in sorted(rows, key=lambda x: x.strike):
+        cum += r.net_bn
+        if prev_cum is not None and prev_cum != 0 and cum * prev_cum < 0 and prev_s is not None:
+            frac = abs(prev_cum) / (abs(prev_cum) + abs(cum))
+            gamma_flip = prev_s + frac * (r.strike - prev_s)
+            break
+        prev_s, prev_cum = r.strike, cum
+    return gamma_flip
+
+
+def _max_pain_from_gex_rows(rows: list[GexStrikeRow]) -> float:
+    if not rows:
+        return 0.0
+    return max(rows, key=lambda r: r.call_gex_bn + r.put_gex_bn).strike
 
 
 def _max_pain_strike(calls: Any, puts: Any, rows: list[GexStrikeRow]) -> float:

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, distinct, func, select
 from sqlalchemy.orm import Session
 
-from app.analytics.gex_compute import compute_gex_profile
+from app.analytics.gex_compute import compute_gex_profile, compute_gex_profile_from_contracts
 from app.analytics.gex_history import list_gex_history, record_gex_snapshot, seed_price_closes
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
 from app.analytics.options_pricing import StrategyLegIn, evaluate_multi_leg
@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/options", tags=["options"])
 
 
+def _query_default(value, fallback):
+    if value.__class__.__module__ == "fastapi.params" and hasattr(value, "default"):
+        return fallback if value.default is None else value.default
+    return value
+
+
 @router.get("/chain/{symbol}")
 def get_options_chain(
     symbol: str,
@@ -40,31 +46,56 @@ def get_options_chain(
     strike_min: Optional[float] = Query(None),
     strike_max: Optional[float] = Query(None),
     limit: int = Query(500, le=1000),
+    realtime: bool = Query(False, description="Prefer low-latency Futu snapshot and bypass stale cache."),
+    strike_window_pct: Optional[float] = Query(None, ge=0.01, le=1.0),
     db: Session = Depends(db_session_dep),
 ):
-    """Return options chain from DB (synced every 15 min) or live Massive API."""
+    """Return options chain from realtime Futu, Redis/DB, or Massive fallback."""
     sym = symbol.upper()
+    expiration_date = _query_default(expiration_date, None)
+    contract_type = _query_default(contract_type, None)
+    strike_min = _query_default(strike_min, None)
+    strike_max = _query_default(strike_max, None)
+    limit = int(_query_default(limit, 500))
+    realtime = bool(_query_default(realtime, False))
+    strike_window_pct = _query_default(strike_window_pct, None)
     cfg = get_settings()
+    cache_suffix = ""
+    if contract_type:
+        cache_suffix += f":{contract_type.lower()}"
+    if strike_min is not None or strike_max is not None:
+        cache_suffix += f":{strike_min or ''}-{strike_max or ''}"
+    if strike_window_pct is not None:
+        cache_suffix += f":spotwin{strike_window_pct}"
+    cache_key = key_options_chain(sym, expiration_date or "") + cache_suffix
 
     if getattr(cfg, "futu_enabled", False):
         try:
-            result = get_futu_client().get_option_chain_snapshot(
+            futu = get_futu_client()
+            futu_strike_min = strike_min
+            futu_strike_max = strike_max
+            if strike_window_pct is not None and futu_strike_min is None and futu_strike_max is None:
+                quote = futu.get_stock_quote(sym)
+                spot = quote.get("last_price") if isinstance(quote, dict) else None
+                if isinstance(spot, (int, float)) and spot > 0:
+                    futu_strike_min = round(float(spot) * (1.0 - float(strike_window_pct)), 4)
+                    futu_strike_max = round(float(spot) * (1.0 + float(strike_window_pct)), 4)
+            result = futu.get_option_chain_snapshot(
                 sym,
                 expiration_date=expiration_date,
                 contract_type=contract_type,
-                strike_price_gte=strike_min,
-                strike_price_lte=strike_max,
+                strike_price_gte=futu_strike_min,
+                strike_price_lte=futu_strike_max,
                 limit=limit,
             )
             if isinstance(result, dict) and not result.get("error") and result.get("contracts"):
-                cache_set(key_options_chain(sym, expiration_date or ""), result, ttl=cfg.futu_cache_ttl_seconds)
+                cache_set(cache_key, result, ttl=cfg.futu_cache_ttl_seconds if realtime else TTL_HOT)
                 return result
         except Exception as exc:
             logger.warning("Futu options chain failed for %s: %s", sym, exc)
 
     # Try Redis cache first
-    cache_key = key_options_chain(sym, expiration_date or "")
-    cached = cache_get(cache_key)
+    cached = None if realtime else cache_get(cache_key)
     if cached:
         return cached
 
@@ -241,9 +272,44 @@ def get_expirations(symbol: str, db: Session = Depends(db_session_dep)):
 
 
 @router.get("/gex/{symbol}")
-def get_gex(symbol: str):
+def get_gex(
+    symbol: str,
+    realtime: bool = Query(False, description="Use live Futu quote and option Greeks when available."),
+    limit: int = Query(500, ge=50, le=1000),
+    strike_window_pct: float = Query(0.2, ge=0.05, le=1.0),
+):
     """Return Gamma Exposure profile (from cache, upstream, or local compute)."""
     sym = symbol.upper()
+    realtime = bool(_query_default(realtime, False))
+    limit = int(_query_default(limit, 500))
+    strike_window_pct = float(_query_default(strike_window_pct, 0.2))
+    cfg = get_settings()
+    if realtime and getattr(cfg, "futu_enabled", False):
+        rt_key = f"{key_gex(sym)}:realtime:{strike_window_pct}:{limit}"
+        cached_rt = cache_get(rt_key)
+        if isinstance(cached_rt, dict) and isinstance(cached_rt.get("netGex"), (int, float)):
+            return cached_rt
+        try:
+            futu = get_futu_client()
+            quote = futu.get_stock_quote(sym)
+            spot = quote.get("last_price") if isinstance(quote, dict) else None
+            if isinstance(spot, (int, float)) and spot > 0:
+                chain = futu.get_option_chain_snapshot(
+                    sym,
+                    strike_price_gte=round(float(spot) * (1.0 - strike_window_pct), 4),
+                    strike_price_lte=round(float(spot) * (1.0 + strike_window_pct), 4),
+                    limit=limit,
+                )
+                contracts = chain.get("contracts") if isinstance(chain, dict) else None
+                if isinstance(contracts, list) and contracts:
+                    result = compute_gex_profile_from_contracts(sym, contracts=contracts, spot=float(spot))
+                    if not result.get("error"):
+                        cache_set(rt_key, result, ttl=cfg.futu_cache_ttl_seconds)
+                        record_gex_snapshot(sym, dict(result))
+                        return result
+        except Exception as exc:
+            logger.warning("Realtime Futu GEX failed for %s: %s", sym, exc)
+
     cached = cache_get(key_gex(sym))
     if cached:
         if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):

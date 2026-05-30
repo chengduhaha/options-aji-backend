@@ -106,13 +106,16 @@ def _parse_futu_contract(item: dict) -> dict:
 def sync_options_chain_pipeline() -> None:
     """Pull option chain snapshots for watchlist symbols and upsert to DB."""
     cfg = get_settings()
-    if not cfg.futu_enabled and not cfg.massive_api_key:
+    use_futu_background = bool(
+        cfg.futu_enabled and getattr(cfg, "futu_background_options_sync_enabled", False)
+    )
+    if not use_futu_background and not cfg.massive_api_key:
         logger.debug("Neither Futu nor Massive option source is enabled, skipping options chain sync")
         return
 
     symbols = cfg.sync_watchlist_symbols
     massive_client = get_massive_client() if cfg.massive_api_key else None
-    futu_client = get_futu_client() if cfg.futu_enabled else None
+    futu_client = get_futu_client() if use_futu_background else None
     session = SessionLocal()
 
     total_upserted = 0

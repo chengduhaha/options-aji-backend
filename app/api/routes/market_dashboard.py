@@ -12,6 +12,7 @@ import httpx
 import yfinance as yf
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy import and_, select
 
 from app.analytics.cboe_equity_pc import fetch_equity_pc_latest
 from app.analytics.iv_metrics import vix_term_structure_hint
@@ -19,6 +20,8 @@ from app.analytics.market_hours import get_us_market_session
 from app.api.deps import bearer_subscription_optional
 from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
+from app.db.models import OptionsSnapshotRow
+from app.db.session import SessionLocal
 from app.services.cache_service import (
     cache_get,
     cache_set,
@@ -234,37 +237,54 @@ def market_symbol(
 
 
 def _scan_unusual_top(toolkit: OpenBBToolkit, *, limit: int) -> list[dict[str, object]]:
+    return _scan_unusual_top_from_db(limit=limit)
+
+
+def _scan_unusual_top_from_db(*, limit: int) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for sym in WATCHLIST_MOVER:
-        ch = toolkit.get_option_chain_full(sym)
-        if not isinstance(ch, dict) or ch.get("error"):
-            continue
-        exp = str(ch.get("expiration") or "")
-        for side, key in (("call", "calls"), ("put", "puts")):
-            arr = ch.get(key) or []
-            if not isinstance(arr, list):
-                continue
-            for rec in arr:
-                if not isinstance(rec, dict):
-                    continue
-                vol = float(rec.get("volume") or 0)
-                oi = float(rec.get("openInterest") or 0)
-                strike = rec.get("strike")
-                if vol < 50 or oi < 1:
-                    continue
-                ratio = vol / max(oi, 1.0)
-                rows.append(
-                    {
-                        "symbol": sym,
-                        "type": side,
-                        "strike": strike,
-                        "expiration": exp,
-                        "volume": vol,
-                        "openInterest": oi,
-                        "volOiRatio": round(ratio, 3),
-                        "iv": rec.get("impliedVolatility"),
-                    }
+    db = SessionLocal()
+    try:
+        q = (
+            select(OptionsSnapshotRow)
+            .where(
+                and_(
+                    OptionsSnapshotRow.underlying_ticker.in_(WATCHLIST_MOVER),
+                    OptionsSnapshotRow.day_volume >= 50,
+                    OptionsSnapshotRow.open_interest >= 1,
                 )
+            )
+            .order_by(OptionsSnapshotRow.day_volume.desc())
+            .limit(1000)
+        )
+        option_rows = db.execute(q).scalars().all()
+    except Exception as exc:
+        logger.warning("overview unusual db scan failed: %s", exc)
+        option_rows = []
+    finally:
+        close = getattr(db, "close", None)
+        if callable(close):
+            close()
+
+    for rec in option_rows:
+        vol = float(rec.day_volume or 0)
+        oi = float(rec.open_interest or 0)
+        if vol < 50 or oi < 1:
+            continue
+        side = str(rec.contract_type or "").lower()
+        ratio = vol / max(oi, 1.0)
+        rows.append(
+            {
+                "symbol": rec.underlying_ticker,
+                "type": side,
+                "strike": rec.strike_price,
+                "expiration": str(rec.expiration_date) if rec.expiration_date else "",
+                "volume": vol,
+                "openInterest": oi,
+                "volOiRatio": round(ratio, 3),
+                "iv": rec.implied_volatility,
+                "source": "options_snapshots",
+            }
+        )
     rows.sort(key=lambda r: float(r.get("volOiRatio") or 0), reverse=True)
     top = rows[:limit]
     for r in top:
