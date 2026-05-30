@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select, desc
 
 from app.clients.fmp_client import get_fmp_client
+from app.clients.futu_client import get_futu_client
 from app.config import get_settings
 from app.db.models import EarningsCalendarRow, StockQuoteRow
 from app.db.session import SessionLocal
@@ -41,6 +42,32 @@ def search_stock(q: str = Query(...), limit: int = Query(10, le=30)):
 @router.get("/{symbol}/quote")
 def get_stock_quote(symbol: str):
     sym = symbol.upper()
+    cfg = get_settings()
+    if getattr(cfg, "futu_enabled", False):
+        futu_quote = get_futu_client().get_stock_quote(sym)
+        if not futu_quote.get("error"):
+            result = {
+                "symbol": sym,
+                "source": "futu",
+                "price": futu_quote.get("last_price"),
+                "change": futu_quote.get("change"),
+                "change_pct": futu_quote.get("change_pct"),
+                "day_high": futu_quote.get("day_high"),
+                "day_low": futu_quote.get("day_low"),
+                "year_high": None,
+                "year_low": None,
+                "volume": futu_quote.get("volume"),
+                "avg_volume": None,
+                "market_cap": futu_quote.get("market_cap"),
+                "pe": futu_quote.get("pe"),
+                "eps": futu_quote.get("eps"),
+                "open": futu_quote.get("regular_market_open"),
+                "previous_close": futu_quote.get("previous_close"),
+                "snapshot_time": futu_quote.get("timestamp"),
+            }
+            cache_set(key_stock_quote(sym), result, ttl=cfg.futu_cache_ttl_seconds)
+            return result
+
     cached = cache_get(key_stock_quote(sym))
     if cached:
         return cached
@@ -64,7 +91,6 @@ def get_stock_quote(symbol: str):
     finally:
         session.close()
 
-    cfg = get_settings()
     if not cfg.fmp_api_key:
         return {"symbol": sym, "error": "no_data"}
     data = get_fmp_client().get_quote(sym)

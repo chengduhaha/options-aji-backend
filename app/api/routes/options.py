@@ -1,28 +1,31 @@
 """Options API routes — chain, snapshots, GEX, unusual activity."""
 from __future__ import annotations
 
-import math
+import datetime as dt
 import logging
+import math
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, and_
+from sqlalchemy import and_, distinct, func, select
 from sqlalchemy.orm import Session
 
+from app.analytics.gex_compute import compute_gex_profile
+from app.analytics.gex_history import list_gex_history, record_gex_snapshot, seed_price_closes
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
 from app.analytics.options_pricing import StrategyLegIn, evaluate_multi_leg
-from app.db.session import db_session_dep
+from app.analytics.unusual_v2 import score_snapshot_rows
+from app.clients.fmp_client import get_fmp_client
+from app.clients.futu_client import get_futu_client
 from app.clients.massive_client import get_massive_client
 from app.config import get_settings
 from app.db.models import OptionsSnapshotRow
+from app.db.session import db_session_dep
 from app.services.cache_service import (
     TTL_HOT, cache_get, cache_set,
     key_options_chain, key_gex,
 )
-from app.analytics.gex_compute import compute_gex_profile
-from app.analytics.gex_history import record_gex_snapshot
-from app.analytics.unusual_v2 import score_snapshot_rows
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,22 @@ def get_options_chain(
     """Return options chain from DB (synced every 15 min) or live Massive API."""
     sym = symbol.upper()
     cfg = get_settings()
+
+    if getattr(cfg, "futu_enabled", False):
+        try:
+            result = get_futu_client().get_option_chain_snapshot(
+                sym,
+                expiration_date=expiration_date,
+                contract_type=contract_type,
+                strike_price_gte=strike_min,
+                strike_price_lte=strike_max,
+                limit=limit,
+            )
+            if isinstance(result, dict) and not result.get("error") and result.get("contracts"):
+                cache_set(key_options_chain(sym, expiration_date or ""), result, ttl=cfg.futu_cache_ttl_seconds)
+                return result
+        except Exception as exc:
+            logger.warning("Futu options chain failed for %s: %s", sym, exc)
 
     # Try Redis cache first
     cache_key = key_options_chain(sym, expiration_date or "")
@@ -146,22 +165,25 @@ def get_iv_analysis(symbol: str) -> dict[str, object]:
     )
 
     term: list[dict[str, object]] = []
+    skew: list[dict[str, object]] = []
     try:
-        chain = tk.get_option_chain_full(sym)
-        expirations = list(chain.get("expirations") or []) if isinstance(chain, dict) else []
-        calls = list(chain.get("calls") or []) if isinstance(chain, dict) else []
-        spot_val = chain.get("underlyingPrice") if isinstance(chain, dict) else None
+        chain = tk.get_option_chain_full(sym, prefetch_expirations=8)
+        if not isinstance(chain, dict):
+            raise TypeError("chain_payload_not_dict")
+        prefetched = list(chain.get("prefetchedChains") or [])
+        spot_val = chain.get("underlyingPrice")
         spot = float(spot_val) if isinstance(spot_val, (int, float)) else 0.0
-        for exp in expirations[:8]:
-            exp_str = str(exp)
-            exp_chain = tk.get_option_chain_full(sym, expiration=exp_str)
-            exp_calls = list(exp_chain.get("calls") or []) if isinstance(exp_chain, dict) else []
+
+        for block in prefetched[:8]:
+            exp_str = str(block.get("expiration") or "")
+            exp_calls = list(block.get("calls") or [])
             if not exp_calls:
                 continue
-            if spot <= 0:
+            spot_use = spot
+            if spot_use <= 0:
                 strike0 = exp_calls[0].get("strike")
                 if isinstance(strike0, (int, float)):
-                    spot = float(strike0)
+                    spot_use = float(strike0)
             best = None
             best_dist = float("inf")
             for rec in exp_calls:
@@ -171,20 +193,15 @@ def get_iv_analysis(symbol: str) -> dict[str, object]:
                     continue
                 if iv <= 0:
                     continue
-                dist = abs(float(strike) - spot)
+                dist = abs(float(strike) - spot_use)
                 if dist < best_dist:
                     best_dist = dist
                     best = float(iv) * 100.0
             term.append({"expiration": exp_str, "atmIvPct": round(best, 4) if best is not None else None})
-    except Exception as exc:
-        logger.warning("iv term structure failed symbol=%s err=%s", sym, exc)
 
-    skew: list[dict[str, object]] = []
-    try:
-        ch = tk.get_option_chain_full(sym)
-        calls = ch.get("calls") or []
-        if isinstance(calls, list):
-            for rec in calls:
+        calls_front = list(chain.get("calls") or [])
+        if isinstance(calls_front, list):
+            for rec in calls_front:
                 if not isinstance(rec, dict):
                     continue
                 strike = rec.get("strike")
@@ -194,9 +211,9 @@ def get_iv_analysis(symbol: str) -> dict[str, object]:
                 if math.isnan(float(iv)) or float(iv) <= 0:
                     continue
                 skew.append({"strike": float(strike), "ivPct": round(float(iv) * 100.0, 4)})
-            skew.sort(key=lambda x: float(x["strike"]))
+        skew.sort(key=lambda x: float(x["strike"]))
     except Exception as exc:
-        logger.warning("iv skew failed symbol=%s err=%s", sym, exc)
+        logger.warning("iv chain bundle failed symbol=%s err=%s", sym, exc)
 
     return {
         "symbol": sym,
@@ -215,7 +232,6 @@ def get_iv_analysis(symbol: str) -> dict[str, object]:
 def get_expirations(symbol: str, db: Session = Depends(db_session_dep)):
     """Return available expiration dates for a symbol."""
     sym = symbol.upper()
-    from sqlalchemy import distinct
     exps = db.execute(
         select(distinct(OptionsSnapshotRow.expiration_date))
         .where(OptionsSnapshotRow.underlying_ticker == sym)
@@ -230,6 +246,8 @@ def get_gex(symbol: str):
     sym = symbol.upper()
     cached = cache_get(key_gex(sym))
     if cached:
+        if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):
+            record_gex_snapshot(sym, dict(cached))
         return cached
 
     result = compute_gex_profile(sym)
@@ -247,7 +265,9 @@ def get_gex_history_endpoint(
     """Sparse GEX points from Redis snapshots + Yahoo daily closes."""
 
     sym = symbol.upper()
-    from app.analytics.gex_history import list_gex_history, seed_price_closes
+    cached = cache_get(key_gex(sym))
+    if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):
+        record_gex_snapshot(sym, dict(cached))
 
     return {
         "symbol": sym,
@@ -264,7 +284,6 @@ def get_unusual_options(
     db: Session = Depends(db_session_dep),
 ):
     """Return unusual options activity (high volume/OI ratio)."""
-    from sqlalchemy import case
     query = (
         select(OptionsSnapshotRow)
         .where(
@@ -443,8 +462,6 @@ def get_atm_option_history(
 ):
     """Return OHLCV bars for the ATM option of a given symbol + expiration."""
     sym = symbol.upper()
-    from sqlalchemy import func
-
     spot = None
     spot_row = db.execute(
         select(OptionsSnapshotRow.underlying_price)
@@ -457,7 +474,6 @@ def get_atm_option_history(
         try:
             cfg = get_settings()
             if cfg.fmp_api_key:
-                from app.clients.fmp_client import get_fmp_client
                 q = get_fmp_client().get_quote(sym)
                 if q and q.get("price"):
                     spot = float(q["price"])
@@ -467,9 +483,8 @@ def get_atm_option_history(
     if not spot:
         # Last resort: use midpoint from any contract in chain
         try:
-            from sqlalchemy import func as sa_func
             mid = db.execute(
-                select(sa_func.avg(OptionsSnapshotRow.midpoint))
+                select(func.avg(OptionsSnapshotRow.midpoint))
                 .where(OptionsSnapshotRow.underlying_ticker == sym)
             ).scalar()
             if mid:
@@ -500,7 +515,6 @@ def get_atm_option_history(
     if not cfg.massive_api_key:
         return {"ticker": options_ticker, "bars": [], "error": "massive_api_not_configured"}
 
-    import datetime as dt
     today = dt.datetime.now(dt.timezone.utc)
     from_date = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
     to_date = today.strftime("%Y-%m-%d")

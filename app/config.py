@@ -80,12 +80,25 @@ class Settings(BaseSettings):
     fmp_api_key: str = ""
     fmp_base_url: str = "https://financialmodelingprep.com/stable"
 
+    # ── Futu OpenAPI (real-time US stocks/options via local OpenD) ────────────
+    futu_enabled: bool = False
+    futu_host: str = "127.0.0.1"
+    futu_port: int = 11111
+    futu_snapshot_batch_size: int = 200
+    futu_cache_ttl_seconds: int = 3
+    futu_connect_timeout_seconds: float = 0.3
+
     # ── OpenRouter LLM ────────────────────────────────────────────────────────
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     model_parse: str = "deepseek/deepseek-chat"
     model_synthesis: str = "deepseek/deepseek-chat"
     feed_enrichment_model: str = ""
+
+    # ── Xiaomi MiMo LLM (OpenAI-compatible) ───────────────────────────────────
+    xiaomi_api_key: str = "tp-c919p7m8394hxs9jsf5oqxma5ok85yil9qsa99jngzp9ormw"
+    xiaomi_base_url: str = "https://api.xiaomimimo.com/v1"
+    xiaomi_model: str = "mimo-v2.5"
 
     # ── Data sync ─────────────────────────────────────────────────────────────
     # Comma-separated list of symbols to keep in sync
@@ -128,6 +141,19 @@ class Settings(BaseSettings):
     auth_verification_max_attempts: int = 5
     auth_verification_debug_expose_code: bool = False
 
+    # ── Email (registration verification) ─────────────────────────────────────
+    # smtp | resend | console (console = log only, for local dev)
+    email_provider: str = "smtp"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "OptionsAji"
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+    resend_api_key: str = ""
+
     # ── Access control ────────────────────────────────────────────────────────
     subscription_tokens: str = ""
     subscription_required: bool = False
@@ -152,7 +178,10 @@ class Settings(BaseSettings):
     )
     gex_backend_url: str = ""
     gex_backend_headers: str = ""
-    retention_days: int = 3
+    #: Discord messages + enrichments kept in PostgreSQL (CASCADE delete).
+    discord_retention_hours: int = 48
+    #: Legacy alias; ignored when ``discord_retention_hours`` is set via env.
+    retention_days: int = 2
     agent_discord_context_hours: int = 72
     agent_discord_context_limit: int = 18
     integration_status_public: bool = True

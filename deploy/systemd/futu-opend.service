@@ -1,0 +1,16 @@
+[Unit]
+Description=Futu OpenD Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace/futu-opend/Futu_OpenD_10.6.6608_Centos7/Futu_OpenD_10.6.6608_Centos7
+ExecStart=/root/workspace/futu-opend/Futu_OpenD_10.6.6608_Centos7/Futu_OpenD_10.6.6608_Centos7/FutuOpenD -cfg_file=/root/workspace/futu-opend/Futu_OpenD_10.6.6608_Centos7/Futu_OpenD_10.6.6608_Centos7/FutuOpenD.optionsaji.xml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

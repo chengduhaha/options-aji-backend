@@ -14,12 +14,13 @@ from dataclasses import dataclass
 from typing import Optional, cast
 
 import httpx
-import yfinance as yf
 
 from app.analytics.gex_compute import compute_gex_profile
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
 from app.clients.fmp_client import get_fmp_client
+from app.clients.futu_client import get_futu_client
 from app.config import get_settings
+from app.tools.yf_helpers import yf_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,14 @@ class OpenBBToolkit:
             return {"error": "empty_symbol"}
 
         settings = get_settings()
+        if getattr(settings, "futu_enabled", False):
+            try:
+                row = get_futu_client().get_stock_quote(guard)
+                if isinstance(row, dict) and not row.get("error"):
+                    return row
+            except Exception as exc:
+                logger.warning("get_quote Futu(%s): %s", guard, exc)
+
         if settings.fmp_api_key.strip():
             try:
                 fmp = get_fmp_client()
@@ -104,7 +113,7 @@ class OpenBBToolkit:
                 logger.warning("get_quote FMP(%s): %s", guard, exc)
 
         try:
-            ticker = yf.Ticker(guard)
+            ticker = yf_ticker(guard)
             qi = ticker.fast_info
             last = qi.get("last_price")
             prev = qi.get("previous_close")
@@ -153,12 +162,13 @@ class OpenBBToolkit:
         volume_raw = qt.get("volume")
         volume_val = _scalar_int(volume_raw)
 
+        # UI fallbacks when chain/PCR cannot be read (real values filled below when Yahoo returns data).
         atm_iv = 18.5
         iv_rank = 35
         pcr = 0.85
 
         try:
-            ticker = yf.Ticker(guard)
+            ticker = yf_ticker(guard)
             opts_list = list(ticker.options or [])
             expiry = opts_list[0] if opts_list else None
 
@@ -223,8 +233,32 @@ class OpenBBToolkit:
         if not guard:
             return {"error": "empty_symbol"}
 
+        settings = get_settings()
+        if getattr(settings, "futu_enabled", False):
+            try:
+                payload = get_futu_client().get_option_chain_snapshot(
+                    guard,
+                    expiration_date=expiration,
+                    limit=max(head * 4, 200),
+                )
+                if isinstance(payload, dict) and not payload.get("error") and payload.get("contracts"):
+                    chain = _futu_payload_to_chain(guard, payload, expiration=expiration, prefetch_expirations=0)
+                    calls = list(chain.get("calls") or [])
+                    puts = list(chain.get("puts") or [])
+                    return {
+                        "symbol": guard,
+                        "source": "futu",
+                        "expiry": chain.get("expiration"),
+                        "expirations": chain.get("expirations") or [],
+                        "calls_trimmed": calls if head <= 0 else calls[:head],
+                        "puts_trimmed": puts if head <= 0 else puts[:head],
+                        "note": "Futu OpenAPI real-time option snapshot.",
+                    }
+            except Exception as exc:
+                logger.warning("get_option_chain Futu(%s): %s", guard, exc)
+
         try:
-            ticker = yf.Ticker(guard)
+            ticker = yf_ticker(guard)
             opts = list(ticker.options or [])
         except Exception as exc:
             logger.warning("get_option_chain(%s): %s", guard, exc)
@@ -258,13 +292,41 @@ class OpenBBToolkit:
             "note": "Agent digest may use trimmed head; UI should call /api/stock/{sym}/chain?full=1.",
         }
 
-    def get_option_chain_full(self, symbol: str, *, expiration: Optional[str] = None) -> dict[str, object]:
+    def get_option_chain_full(
+        self,
+        symbol: str,
+        *,
+        expiration: Optional[str] = None,
+        prefetch_expirations: int = 0,
+    ) -> dict[str, object]:
         guard = symbol.strip().upper()
         if not guard:
             return {"error": "empty_symbol"}
+        if expiration is not None:
+            prefetch_expirations = 0
+        if prefetch_expirations < 0:
+            prefetch_expirations = 0
+
+        settings = get_settings()
+        if getattr(settings, "futu_enabled", False):
+            try:
+                payload = get_futu_client().get_option_chain_snapshot(
+                    guard,
+                    expiration_date=expiration,
+                    limit=1500,
+                )
+                if isinstance(payload, dict) and not payload.get("error") and payload.get("contracts"):
+                    return _futu_payload_to_chain(
+                        guard,
+                        payload,
+                        expiration=expiration,
+                        prefetch_expirations=prefetch_expirations,
+                    )
+            except Exception as exc:
+                logger.warning("get_option_chain_full Futu(%s): %s", guard, exc)
 
         try:
-            ticker = yf.Ticker(guard)
+            ticker = yf_ticker(guard)
             opts = list(ticker.options or [])
         except Exception as exc:
             logger.warning("get_option_chain_full(%s): %s", guard, exc)
@@ -274,17 +336,6 @@ class OpenBBToolkit:
         if not expiry:
             return {"symbol": guard, "error": "no_option_chain"}
 
-        try:
-            chain = ticker.option_chain(expiry)
-        except Exception as exc:
-            logger.warning("get_option_chain_full chain(%s): %s", guard, exc)
-            return {"symbol": guard, "error": "chain_fetch_failed"}
-
-        calls_records = chain.calls.fillna("").to_dict("records")
-        puts_records = chain.puts.fillna("").to_dict("records")
-        calls_json = [_json_safe_row(cast(dict[str, object], r)) for r in calls_records]
-        puts_json = [_json_safe_row(cast(dict[str, object], r)) for r in puts_records]
-
         spot = 0.0
         try:
             lp = ticker.fast_info.get("last_price")
@@ -292,6 +343,44 @@ class OpenBBToolkit:
                 spot = float(lp)
         except Exception:
             pass
+
+        def _rows_for_exp(exp: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+            chain = ticker.option_chain(exp)
+            calls_records = chain.calls.fillna("").to_dict("records")
+            puts_records = chain.puts.fillna("").to_dict("records")
+            calls_json = [_json_safe_row(cast(dict[str, object], r)) for r in calls_records]
+            puts_json = [_json_safe_row(cast(dict[str, object], r)) for r in puts_records]
+            return calls_json, puts_json
+
+        if prefetch_expirations > 0:
+            targets = opts[:prefetch_expirations]
+            prefetched: list[dict[str, object]] = []
+            for exp in targets:
+                exp_str = str(exp)
+                try:
+                    cj, pj = _rows_for_exp(exp)
+                    prefetched.append({"expiration": exp_str, "calls": cj, "puts": pj})
+                except Exception as exc:
+                    logger.warning("get_option_chain_full chain(%s %s): %s", guard, exp_str, exc)
+                    continue
+            if not prefetched:
+                return {"symbol": guard, "error": "chain_fetch_failed"}
+            first = prefetched[0]
+            return {
+                "symbol": guard,
+                "expiration": str(first["expiration"]),
+                "expirations": [str(x) for x in opts],
+                "underlyingPrice": round(spot, 4) if spot > 0 else None,
+                "calls": first["calls"],
+                "puts": first["puts"],
+                "prefetchedChains": prefetched,
+            }
+
+        try:
+            calls_json, puts_json = _rows_for_exp(expiry)
+        except Exception as exc:
+            logger.warning("get_option_chain_full chain(%s): %s", guard, exc)
+            return {"symbol": guard, "error": "chain_fetch_failed"}
 
         return {
             "symbol": guard,
@@ -393,3 +482,79 @@ def _json_safe_row(record: dict[str, object]) -> dict[str, object]:
                 pass
         out[str(k)] = v
     return out
+
+
+def _futu_contract_to_option_row(contract: dict[str, object]) -> dict[str, object]:
+    return {
+        "contractSymbol": contract.get("ticker"),
+        "strike": contract.get("strike_price"),
+        "lastPrice": contract.get("last_trade_price") or contract.get("midpoint"),
+        "bid": contract.get("bid"),
+        "ask": contract.get("ask"),
+        "volume": contract.get("day_volume"),
+        "openInterest": contract.get("open_interest"),
+        "impliedVolatility": contract.get("implied_volatility"),
+        "delta": contract.get("delta"),
+        "gamma": contract.get("gamma"),
+        "theta": contract.get("theta"),
+        "vega": contract.get("vega"),
+        "expiration": contract.get("expiration_date"),
+    }
+
+
+def _futu_payload_to_chain(
+    guard: str,
+    payload: dict[str, object],
+    *,
+    expiration: Optional[str],
+    prefetch_expirations: int,
+) -> dict[str, object]:
+    contracts = [c for c in list(payload.get("contracts") or []) if isinstance(c, dict)]
+    expirations = sorted({str(c.get("expiration_date")) for c in contracts if c.get("expiration_date")})
+    selected_expiration = expiration or (expirations[0] if expirations else None)
+    selected = [
+        c
+        for c in contracts
+        if selected_expiration is None or str(c.get("expiration_date")) == str(selected_expiration)
+    ]
+    calls = [
+        _futu_contract_to_option_row(c)
+        for c in selected
+        if str(c.get("contract_type") or "").lower() == "call"
+    ]
+    puts = [
+        _futu_contract_to_option_row(c)
+        for c in selected
+        if str(c.get("contract_type") or "").lower() == "put"
+    ]
+    calls.sort(key=lambda row: float(row.get("strike") or 0))
+    puts.sort(key=lambda row: float(row.get("strike") or 0))
+
+    result: dict[str, object] = {
+        "symbol": guard,
+        "source": "futu",
+        "expiration": selected_expiration,
+        "expirations": expirations,
+        "underlyingPrice": None,
+        "calls": calls,
+        "puts": puts,
+    }
+    if prefetch_expirations > 0:
+        prefetched: list[dict[str, object]] = []
+        for exp in expirations[:prefetch_expirations]:
+            exp_contracts = [c for c in contracts if str(c.get("expiration_date")) == exp]
+            exp_calls = [
+                _futu_contract_to_option_row(c)
+                for c in exp_contracts
+                if str(c.get("contract_type") or "").lower() == "call"
+            ]
+            exp_puts = [
+                _futu_contract_to_option_row(c)
+                for c in exp_contracts
+                if str(c.get("contract_type") or "").lower() == "put"
+            ]
+            exp_calls.sort(key=lambda row: float(row.get("strike") or 0))
+            exp_puts.sort(key=lambda row: float(row.get("strike") or 0))
+            prefetched.append({"expiration": exp, "calls": exp_calls, "puts": exp_puts})
+        result["prefetchedChains"] = prefetched
+    return result
