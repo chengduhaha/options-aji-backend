@@ -1,0 +1,84 @@
+{
+  "sections": [
+    {
+      "id": "section1",
+      "topic": "core_strategies",
+      "title_zh": "一、 核心策略选择与实战全景",
+      "keywords": [
+        "策略",
+        "Long",
+        "Spread",
+        "卖方",
+        "Iron Condor",
+        "DTE",
+        "IV Rank"
+      ],
+      "summary": "四大核心策略：单边买方、垂直价差、卖方备兑/Iron Condor；强调 DTE 30-60、IV Rank 与行权价 Delta 选择。"
+    },
+    {
+      "id": "section2",
+      "topic": "payoff_curves",
+      "title_zh": "二、 期权收益曲线：理想与现实的博弈",
+      "keywords": [
+        "收益曲线",
+        "Theta",
+        "Gamma",
+        "到期"
+      ],
+      "summary": "区分到期折线与未到期动态收益曲线；Theta 在到期前 15 天加速衰减，买方宜提前止盈。"
+    },
+    {
+      "id": "section3",
+      "topic": "crisis_management",
+      "title_zh": "三、 持有期间与意外情况的危机处理（实战精髓）",
+      "keywords": [
+        "止损",
+        "Roll",
+        "拆弹",
+        "横盘",
+        "IV Crush"
+      ],
+      "summary": "危机拆弹：Long 不摊平、Short 被击穿可 Roll；横盘时 Long 清仓、Short 在 50-70% 利润主动平仓。"
+    },
+    {
+      "id": "section4",
+      "topic": "greeks_strategies",
+      "title_zh": "四、 希腊字母共振与特种策略构建",
+      "keywords": [
+        "Greeks",
+        "Delta",
+        "Vega",
+        "Calendar",
+        "Ratio"
+      ],
+      "summary": "Delta/Gamma/Theta/Vega 博弈视角；日历价差与比例价差等特种结构。"
+    },
+    {
+      "id": "section4_2",
+      "topic": "quant_metrics",
+      "title_zh": "五、 期权核心量化指标解读",
+      "keywords": [
+        "IV Rank",
+        "GEX",
+        "Expected Move",
+        "Volume",
+        "OI",
+        "PCR"
+      ],
+      "summary": "IV Rank 买卖方阈值、Volume vs OI、Market GEX；Expected Move 用于铁鹰 wings 设定。"
+    },
+    {
+      "id": "section5",
+      "topic": "unusual_flow",
+      "title_zh": "六、 真实异动大单（Unusual Flow）案例与跟庄方法论",
+      "keywords": [
+        "异动",
+        "Sweep",
+        "Vol/OI",
+        "跟庄",
+        "五步法"
+      ],
+      "summary": "异动五步法：市值/权利金过滤、Vol>>OI、Ask 成交、IV 共振；散户跟单改 ATM/价差勿抄虚值。"
+    }
+  ]
+}

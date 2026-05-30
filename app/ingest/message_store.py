@@ -80,10 +80,24 @@ def delete_messages_older_than(
     return int(result.rowcount or 0)
 
 
-def cleanup_retention(session: Session, settings: Optional[Settings] = None) -> int:
+def discord_retention_cutoff(settings: Optional[Settings] = None) -> dt.datetime:
     cfg = settings or get_settings()
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=cfg.retention_days)
-    return delete_messages_older_than(session, cutoff=cutoff)
+    hours = max(1, int(cfg.discord_retention_hours))
+    return dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+
+
+def cleanup_retention(session: Session, settings: Optional[Settings] = None) -> int:
+    """Delete Discord rows older than ``discord_retention_hours`` (default 48h)."""
+    cutoff = discord_retention_cutoff(settings)
+    removed = delete_messages_older_than(session, cutoff=cutoff)
+    cfg = settings or get_settings()
+    logger.info(
+        "Discord retention purge: removed=%s cutoff_before=%s retention_hours=%s",
+        removed,
+        cutoff.isoformat(),
+        cfg.discord_retention_hours,
+    )
+    return removed
 
 
 def list_messages_recent(

@@ -6,6 +6,7 @@ import logging
 import math
 from typing import Optional
 
+import pandas as pd
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -36,19 +37,11 @@ def historical_volatility(closes: list[float], trading_days: int) -> Optional[fl
     return float(math.sqrt(var) * math.sqrt(252)) * 100.0
 
 
-def hv_series_and_current(symbol: str) -> tuple[list[tuple[str, float]], dict[str, object]]:
-    """Return list of (date.iso, hv20_pct) for ~1y and metadata."""
-
-    guard = symbol.strip().upper()
-    if not guard:
-        return [], {"error": "empty_symbol"}
-
-    try:
-        t = yf.Ticker(guard)
-        hist = t.history(period="1y", interval="1d", auto_adjust=True)
-    except Exception as exc:
-        logger.warning("hv_series(%s): %s", guard, exc)
-        return [], {"symbol": guard, "error": "history_failed"}
+def hv_series_and_meta_from_hist(
+    hist: pd.DataFrame | None,
+    guard: str,
+) -> tuple[list[tuple[str, float]], dict[str, object]]:
+    """HV time series + meta from an existing yfinance-style OHLCV dataframe."""
 
     if hist is None or hist.empty or "Close" not in hist.columns:
         return [], {"symbol": guard, "error": "no_history"}
@@ -81,6 +74,23 @@ def hv_series_and_current(symbol: str) -> tuple[list[tuple[str, float]], dict[st
         "methodology": "HV20/HV60 from log-returns, annualized * sqrt(252) as percent.",
     }
     return series[-260:], meta
+
+
+def hv_series_and_current(symbol: str) -> tuple[list[tuple[str, float]], dict[str, object]]:
+    """Return list of (date.iso, hv20_pct) for ~1y and metadata."""
+
+    guard = symbol.strip().upper()
+    if not guard:
+        return [], {"error": "empty_symbol"}
+
+    try:
+        t = yf.Ticker(guard)
+        hist = t.history(period="1y", interval="1d", auto_adjust=True)
+    except Exception as exc:
+        logger.warning("hv_series(%s): %s", guard, exc)
+        return [], {"symbol": guard, "error": "history_failed"}
+
+    return hv_series_and_meta_from_hist(hist, guard)
 
 
 def iv_rank_percentile_proxy(

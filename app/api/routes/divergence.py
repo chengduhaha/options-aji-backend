@@ -8,7 +8,6 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
@@ -18,6 +17,7 @@ from app.config import get_settings
 from app.db.models import TickerSentimentSnapshotRow
 from app.db.session import db_session_dep
 from app.services.cache_service import cache_get, cache_set
+from app.services.llm_router import build_chat_openai, has_llm_provider
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/divergence", tags=["divergence"])
@@ -59,7 +59,17 @@ def _insider_sells(symbol: str, days: int) -> list[dict]:
     if not cfg.fmp_api_key:
         return []
     try:
-        data = get_fmp_client()._get("/insider-trading", {"symbol": symbol, "limit": 30}) or []
+        # FMP stable: /insider-trading returns 404; use /insider-trading/search (verified 200 + list).
+        raw = get_fmp_client()._get("/insider-trading/search", {"symbol": symbol, "limit": 30})
+        if not isinstance(raw, list):
+            logger.warning(
+                "insider_trading_search expected list for %s, got %s",
+                symbol,
+                type(raw).__name__,
+            )
+            data: list[dict] = []
+        else:
+            data = raw
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         sells = []
         for t in data:
@@ -87,22 +97,22 @@ def _insider_sells(symbol: str, days: int) -> list[dict]:
             )
         return sells
     except Exception as exc:
-        logger.debug("insider_sells %s: %s", symbol, exc)
+        logger.warning("insider_sells failed symbol=%s: %s", symbol, exc)
         return []
 
 
 def _ai_narrative(symbol: str, social: dict, insider: list[dict], score: int) -> str:
     """Generate concise Chinese narrative about the divergence signal."""
     cfg = get_settings()
-    if not cfg.openrouter_api_key:
+    if not has_llm_provider(cfg):
         return ""
     try:
         sell_total = sum(t.get("total_value", 0) for t in insider)
         sell_note = f"内部人士近期卖出约 ${sell_total:,.0f}" if insider else "近期无内部人士卖出记录"
-        llm = ChatOpenAI(
-            api_key=cfg.openrouter_api_key,
-            base_url=cfg.openrouter_base_url,
-            model=cfg.model_synthesis,
+        llm = build_chat_openai(
+            cfg,
+            openrouter_model=cfg.model_synthesis,
+            source="divergence_narrative",
             temperature=0.3,
             timeout=20,
             max_retries=1,

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import math
-from typing import Any, Optional
+from typing import Optional
 
 import yfinance as yf
 from fastapi import APIRouter, Depends, Query
@@ -14,7 +15,11 @@ from sqlalchemy.orm import Session
 
 from app.analytics.earnings_depth import build_earnings_history
 from app.analytics.gex_history import record_gex_snapshot
-from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
+from app.analytics.iv_metrics import (
+    hv_series_and_current,
+    hv_series_and_meta_from_hist,
+    iv_rank_percentile_proxy,
+)
 from app.analytics.options_chain_analysis import analysis_from_yfinance_rows, build_chain_analysis
 from app.analytics.unusual_v2 import score_snapshot_rows
 from app.api.deps import bearer_subscription_optional
@@ -23,56 +28,64 @@ from app.db.models import OptionsSnapshotRow
 from app.db.session import db_session_dep
 from app.services.cache_service import TTL_HOT, cache_get, cache_set, key_stock_overview
 from app.tools.openbb_tools import build_default_toolkit
+from app.tools.yf_helpers import yf_ticker
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
 
 
-@router.get("/{symbol}/overview")
-def stock_overview(
-    symbol: str,
-    _: Optional[str] = Depends(bearer_subscription_optional),
-) -> dict[str, object]:
-    sym = symbol.strip().upper()
-    cached = cache_get(key_stock_overview(sym))
-    if cached:
-        return cached
+def _overview_toolkit_block(sym: str) -> tuple[dict[str, object], dict[str, object]]:
     tk = build_default_toolkit()
-    bar = tk.frontend_market_bar(sym)
-    qt = tk.get_quote(sym)
+    return tk.frontend_market_bar(sym), tk.get_quote(sym)
 
-    hv_series, hv_meta = hv_series_and_current(sym)
-    spot = float(bar.get("price") or 0) if isinstance(bar.get("price"), (int, float)) else 0.0
 
-    # Price history for chart
+def _fetch_yf_history_1y(sym: str):
+    return yf_ticker(sym).history(period="1y", interval="1d", auto_adjust=True)
+
+
+def _ohlc_from_hist(hist: object) -> list[dict[str, object]]:
     ohlc: list[dict[str, object]] = []
+    if hist is None or getattr(hist, "empty", True):
+        return ohlc
     try:
-        t = yf.Ticker(sym)
-        hist = t.history(period="1y", interval="1d", auto_adjust=True)
-        if hist is not None and not hist.empty:
-            for idx, row in hist.iterrows():
-                d = idx.date().isoformat() if hasattr(idx, "date") else str(idx)[:10]
-                ohlc.append(
-                    {
-                        "date": d,
-                        "open": float(row["Open"]) if "Open" in row else None,
-                        "high": float(row["High"]) if "High" in row else None,
-                        "low": float(row["Low"]) if "Low" in row else None,
-                        "close": float(row["Close"]) if "Close" in row else None,
-                        "volume": float(row["Volume"]) if "Volume" in row else None,
-                    }
-                )
+        for idx, row in hist.iterrows():
+            d = idx.date().isoformat() if hasattr(idx, "date") else str(idx)[:10]
+            ohlc.append(
+                {
+                    "date": d,
+                    "open": float(row["Open"]) if "Open" in row else None,
+                    "high": float(row["High"]) if "High" in row else None,
+                    "low": float(row["Low"]) if "Low" in row else None,
+                    "close": float(row["Close"]) if "Close" in row else None,
+                    "volume": float(row["Volume"]) if "Volume" in row else None,
+                }
+            )
     except Exception as exc:
-        logger.warning("stock overview history %s: %s", sym, exc)
+        logger.warning("ohlc from hist: %s", exc)
+    return ohlc
 
-    # Options aggregates (front expiry)
+
+def _yf_overview_followups(sym: str, spot: float, hist: object) -> tuple[
+    list[tuple[str, float]],
+    dict[str, object],
+    list[dict[str, object]],
+    float,
+    float,
+    float,
+    float,
+    str | None,
+    int | None,
+    list[dict[str, object]],
+]:
+    hv_series, hv_meta = hv_series_and_meta_from_hist(hist, sym)
+    ohlc = _ohlc_from_hist(hist)
     call_vol = put_vol = call_oi = put_oi = 0.0
+    t = yf_ticker(sym)
     try:
-        t2 = yf.Ticker(sym)
-        opts = list(t2.options or [])
+        opts = list(t.options or [])
         if opts and spot > 0:
-            oc = t2.option_chain(opts[0])
+            oc = t.option_chain(opts[0])
             if not oc.calls.empty:
                 call_vol = float(oc.calls["volume"].fillna(0).astype(float).sum())
                 call_oi = float(oc.calls["openInterest"].fillna(0).astype(float).sum())
@@ -81,6 +94,145 @@ def stock_overview(
                 put_oi = float(oc.puts["openInterest"].fillna(0).astype(float).sum())
     except Exception as exc:
         logger.warning("stock overview opt stats %s: %s", sym, exc)
+
+    next_earn = None
+    days_to = None
+    try:
+        eds = getattr(t, "earnings_dates", None)
+        if eds is not None and hasattr(eds, "index") and len(eds.index) > 0:
+            ts0 = eds.index[0]
+            if hasattr(ts0, "date"):
+                next_earn = ts0.date().isoformat()
+                delta = ts0.date() - dt.datetime.now(dt.timezone.utc).date()
+                days_to = delta.days
+    except Exception:
+        pass
+
+    expected_moves = _expected_moves_for_symbol(sym, spot, ticker=t)
+    return hv_series, hv_meta, ohlc, call_vol, put_vol, call_oi, put_oi, next_earn, days_to, expected_moves
+
+
+def _volatility_bar_term_skew(sym: str) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
+    tk = build_default_toolkit()
+    bar = tk.frontend_market_bar(sym)
+    term: list[dict[str, object]] = []
+    try:
+        t = yf_ticker(sym)
+        opts = list(t.options or [])
+        qi = t.fast_info
+        spot = float(qi.get("last_price") or 0) if isinstance(qi.get("last_price"), (int, float)) else 0.0
+        for exp in opts[:8]:
+            try:
+                oc = t.option_chain(exp)
+                calls = oc.calls
+                if calls.empty or "strike" not in calls.columns:
+                    continue
+                idx = (calls["strike"].astype(float) - spot).abs().idxmin() if spot > 0 else calls["strike"].astype(float).idxmin()
+                row = calls.loc[idx]
+                iv_r = row.get("impliedVolatility")
+                iv_pct = float(iv_r) * 100.0 if isinstance(iv_r, (int, float)) and iv_r > 0 else None
+                term.append({"expiration": str(exp), "atmIvPct": iv_pct})
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.warning("term structure %s: %s", sym, exc)
+
+    skew: list[dict[str, object]] = []
+    try:
+        ch = tk.get_option_chain_full(sym)
+        exp = str(ch.get("expiration") or "")
+        calls = ch.get("calls") or []
+        if isinstance(calls, list):
+            for rec in calls:
+                if not isinstance(rec, dict):
+                    continue
+                iv = rec.get("impliedVolatility")
+                if isinstance(iv, (int, float)) and iv > 0:
+                    skew.append({"strike": rec.get("strike"), "ivPct": float(iv) * 100.0})
+            skew.sort(key=lambda x: float(x.get("strike") or 0))
+    except Exception as exc:
+        logger.warning("skew %s: %s", sym, exc)
+
+    return bar, term, skew
+
+
+def _stock_earnings_body(sym: str, limit: int) -> dict[str, object]:
+    cfg = get_settings()
+    next_dt = None
+    try:
+        t = yf_ticker(sym)
+        eds = getattr(t, "earnings_dates", None)
+        if eds is not None and hasattr(eds, "index") and len(eds.index) > 0:
+            ts0 = eds.index[0]
+            next_dt = ts0.date().isoformat() if hasattr(ts0, "date") else str(ts0)
+    except Exception:
+        pass
+
+    history_tuples, hist_note = build_earnings_history(
+        symbol=sym,
+        fmp_api_key=cfg.fmp_api_key,
+        limit=limit,
+    )
+    moves = [
+        float(e.price_window_move_pct)
+        for e in history_tuples
+        if e.price_window_move_pct is not None
+    ]
+    avg_abs_move = (
+        round(sum(abs(m) for m in moves) / len(moves), 4) if moves else None
+    )
+
+    return {
+        "symbol": sym,
+        "nextEarningsDate": next_dt,
+        "history": [
+            {
+                "date": e.date,
+                "eps": e.eps,
+                "epsEstimated": e.eps_estimated,
+                "revenue": e.revenue,
+                "priceWindowMovePct": e.price_window_move_pct,
+                "ivCrushPct": e.iv_crush_pct,
+                "source": e.source,
+            }
+            for e in history_tuples
+        ],
+        "summary": {
+            "avgAbsPriceWindowMovePct": avg_abs_move,
+            "eventCount": len(history_tuples),
+        },
+        "note": hist_note,
+    }
+
+
+@router.get("/{symbol}/overview")
+async def stock_overview(
+    symbol: str,
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> dict[str, object]:
+    sym = symbol.strip().upper()
+    cached = cache_get(key_stock_overview(sym))
+    if cached:
+        return cached
+
+    (bar, qt), hist = await asyncio.gather(
+        asyncio.to_thread(_overview_toolkit_block, sym),
+        asyncio.to_thread(_fetch_yf_history_1y, sym),
+    )
+    spot = float(bar.get("price") or 0) if isinstance(bar.get("price"), (int, float)) else 0.0
+
+    (
+        hv_series,
+        hv_meta,
+        ohlc,
+        call_vol,
+        put_vol,
+        call_oi,
+        put_oi,
+        next_earn,
+        days_to,
+        expected_moves,
+    ) = await asyncio.to_thread(_yf_overview_followups, sym, spot, hist)
 
     pcr_vol = None
     if call_vol > 0:
@@ -97,22 +249,6 @@ def stock_overview(
     iv_hv = None
     if isinstance(atm_iv, (int, float)) and isinstance(hv20, (int, float)) and hv20 and hv20 > 0:
         iv_hv = float(atm_iv) / float(hv20)
-
-    expected_moves = _expected_moves_for_symbol(sym, spot)
-
-    next_earn = None
-    days_to = None
-    try:
-        t3 = yf.Ticker(sym)
-        eds = getattr(t3, "earnings_dates", None)
-        if eds is not None and hasattr(eds, "index") and len(eds.index) > 0:
-            ts0 = eds.index[0]
-            if hasattr(ts0, "date"):
-                next_earn = ts0.date().isoformat()
-                delta = ts0.date() - dt.datetime.now(dt.timezone.utc).date()
-                days_to = delta.days
-    except Exception:
-        pass
 
     result = {
         "symbol": sym,
@@ -145,8 +281,12 @@ def stock_overview(
     return result
 
 
-def _expected_moves_for_symbol(symbol: str, spot: float) -> list[dict[str, object]]:
-    t = yf.Ticker(symbol)
+def _expected_moves_for_symbol(
+    symbol: str,
+    spot: float,
+    ticker: Optional[yf.Ticker] = None,
+) -> list[dict[str, object]]:
+    t = ticker if ticker is not None else yf_ticker(symbol)
     try:
         opts = list(t.options or [])
     except Exception:
@@ -191,7 +331,23 @@ def _expected_moves_for_symbol(symbol: str, spot: float) -> list[dict[str, objec
                 continue
             straddle = cm + pm
             pct = straddle / spot * 100.0
-            out.append({"bucket": label, "expiration": str(pick), "straddleUsd": round(straddle, 4), "pct": round(pct, 4)})
+            atm_strike = float(row_c["strike"])
+            bucket_zh = {"this_week": "本周到期", "next_week": "下周窗口", "monthly": "近月到期"}.get(
+                label, label
+            )
+            out.append(
+                {
+                    "bucket": label,
+                    "bucketZh": bucket_zh,
+                    "expiration": str(pick),
+                    "straddleUsd": round(straddle, 4),
+                    "pct": round(pct, 4),
+                    "spot": round(spot, 4),
+                    "atmStrike": round(atm_strike, 4),
+                    "callMid": round(cm, 4),
+                    "putMid": round(pm, 4),
+                }
+            )
         except Exception as exc:
             logger.debug("expected move %s %s: %s", symbol, pick, exc)
     return out
@@ -283,58 +439,21 @@ def stock_chain_analysis(
 
 
 @router.get("/{symbol}/volatility")
-def stock_volatility(
+async def stock_volatility(
     symbol: str,
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
     sym = symbol.strip().upper()
-    tk = build_default_toolkit()
-    bar = tk.frontend_market_bar(sym)
-    hv_series, hv_meta = hv_series_and_current(sym)
+    (hv_series, hv_meta), (bar, term, skew) = await asyncio.gather(
+        asyncio.to_thread(hv_series_and_current, sym),
+        asyncio.to_thread(_volatility_bar_term_skew, sym),
+    )
     atm_iv = bar.get("atmIv")
     hv_vals = [v for _, v in hv_series]
     rank_est, pct_est, note = iv_rank_percentile_proxy(
         current_iv_pct=float(atm_iv) if isinstance(atm_iv, (int, float)) else 0.0,
         hv_series_pct=hv_vals,
     )
-
-    term: list[dict[str, object]] = []
-    try:
-        t = yf.Ticker(sym)
-        opts = list(t.options or [])
-        qi = t.fast_info
-        spot = float(qi.get("last_price") or 0) if isinstance(qi.get("last_price"), (int, float)) else 0.0
-        for exp in opts[:8]:
-            try:
-                oc = t.option_chain(exp)
-                calls = oc.calls
-                if calls.empty or "strike" not in calls.columns:
-                    continue
-                idx = (calls["strike"].astype(float) - spot).abs().idxmin() if spot > 0 else calls["strike"].astype(float).idxmin()
-                row = calls.loc[idx]
-                iv_r = row.get("impliedVolatility")
-                iv_pct = float(iv_r) * 100.0 if isinstance(iv_r, (int, float)) and iv_r > 0 else None
-                term.append({"expiration": str(exp), "atmIvPct": iv_pct})
-            except Exception:
-                continue
-    except Exception as exc:
-        logger.warning("term structure %s: %s", sym, exc)
-
-    skew: list[dict[str, object]] = []
-    try:
-        ch = tk.get_option_chain_full(sym)
-        exp = str(ch.get("expiration") or "")
-        calls = ch.get("calls") or []
-        if isinstance(calls, list):
-            for rec in calls:
-                if not isinstance(rec, dict):
-                    continue
-                iv = rec.get("impliedVolatility")
-                if isinstance(iv, (int, float)) and iv > 0:
-                    skew.append({"strike": rec.get("strike"), "ivPct": float(iv) * 100.0})
-            skew.sort(key=lambda x: float(x.get("strike") or 0))
-    except Exception as exc:
-        logger.warning("skew %s: %s", sym, exc)
 
     return {
         "symbol": sym,
@@ -487,55 +606,10 @@ def stock_strategy_ideas(
 
 
 @router.get("/{symbol}/earnings")
-def stock_earnings(
+async def stock_earnings(
     symbol: str,
     _: Optional[str] = Depends(bearer_subscription_optional),
     limit: int = Query(default=8, ge=1, le=24),
 ) -> dict[str, object]:
     sym = symbol.strip().upper()
-    cfg = get_settings()
-    next_dt = None
-    try:
-        t = yf.Ticker(sym)
-        eds = getattr(t, "earnings_dates", None)
-        if eds is not None and hasattr(eds, "index") and len(eds.index) > 0:
-            ts0 = eds.index[0]
-            next_dt = ts0.date().isoformat() if hasattr(ts0, "date") else str(ts0)
-    except Exception:
-        pass
-
-    history_tuples, hist_note = build_earnings_history(
-        symbol=sym,
-        fmp_api_key=cfg.fmp_api_key,
-        limit=limit,
-    )
-    moves = [
-        float(e.price_window_move_pct)
-        for e in history_tuples
-        if e.price_window_move_pct is not None
-    ]
-    avg_abs_move = (
-        round(sum(abs(m) for m in moves) / len(moves), 4) if moves else None
-    )
-
-    return {
-        "symbol": sym,
-        "nextEarningsDate": next_dt,
-        "history": [
-            {
-                "date": e.date,
-                "eps": e.eps,
-                "epsEstimated": e.eps_estimated,
-                "revenue": e.revenue,
-                "priceWindowMovePct": e.price_window_move_pct,
-                "ivCrushPct": e.iv_crush_pct,
-                "source": e.source,
-            }
-            for e in history_tuples
-        ],
-        "summary": {
-            "avgAbsPriceWindowMovePct": avg_abs_move,
-            "eventCount": len(history_tuples),
-        },
-        "note": hist_note,
-    }
+    return await asyncio.to_thread(_stock_earnings_body, sym, limit)

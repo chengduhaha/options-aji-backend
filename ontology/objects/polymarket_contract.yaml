@@ -1,0 +1,40 @@
+object_type: PolymarketContract
+display_name_zh: Polymarket 预测市场合约
+
+attributes:
+  market_id:
+    type: string
+    primary_key: true
+  slug:
+    type: string
+  question:
+    type: string
+  question_zh:
+    type: string
+    description: "AI 翻译的中文问题"
+  yes_price:
+    type: float
+    range: [0, 1]
+  no_price:
+    type: float
+    range: [0, 1]
+  volume_24h:
+    type: float
+  liquidity_usd:
+    type: float
+  resolution_date:
+    type: datetime
+  active:
+    type: boolean
+
+computed:
+  implied_probability:
+    rule: "yes_price"
+  liquidity_quality:
+    type: enum
+    values: [thin, moderate, good, excellent]
+    rule: |
+      liquidity_usd < 10000 -> thin
+      liquidity_usd < 50000 -> moderate
+      liquidity_usd < 200000 -> good
+      else -> excellent

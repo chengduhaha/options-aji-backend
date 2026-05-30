@@ -27,6 +27,7 @@ from app.services.cache_service import (
     cache_set,
     key_market_dashboard_overview,
 )
+from app.services.llm_router import has_llm_provider, post_chat_completions_with_fallback
 from app.tools.openbb_tools import OpenBBToolkit, build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -385,10 +386,9 @@ def market_ai_summary(
             cached=True,
         )
 
-    api_key = cfg.openrouter_api_key.strip()
-    if not api_key:
+    if not has_llm_provider(cfg):
         payload = AiSummaryResponse(
-            text="未配置 OPENROUTER_API_KEY，暂无法生成 AI 摘要。",
+            text="未配置 LLM Provider，暂无法生成 AI 摘要。",
             generated_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
             model="",
             cached=False,
@@ -402,48 +402,43 @@ def market_ai_summary(
         f"输入 JSON（可能较长，请抓重点）：{payload[:28000]}"
     )
     try:
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                f"{cfg.openrouter_base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": cfg.model_synthesis,
-                    "messages": [
-                        {"role": "system", "content": "仅输出紧凑中文短文，无 Markdown 标题。"},
-                        {"role": "user", "content": prompt[:28000]},
-                    ],
-                    "temperature": 0.35,
-                },
-            )
-            resp.raise_for_status()
-            data: dict[str, object] = resp.json()
-            choices = data.get("choices")
-            text = ""
-            if isinstance(choices, list) and choices:
-                msg = choices[0].get("message") if isinstance(choices[0], dict) else None
-                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-                    text = str(msg["content"])
-            if not text.strip():
-                text = "模型未返回可用文本。"
+        data, provider = post_chat_completions_with_fallback(
+            {
+                "messages": [
+                    {"role": "system", "content": "仅输出紧凑中文短文，无 Markdown 标题。"},
+                    {"role": "user", "content": prompt[:28000]},
+                ],
+                "temperature": 0.35,
+            },
+            cfg=cfg,
+            source="market_ai_summary",
+            timeout=60.0,
+        )
+        choices = data.get("choices")
+        text = ""
+        if isinstance(choices, list) and choices:
+            msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                text = str(msg["content"])
+        if not text.strip():
+            text = "模型未返回可用文本。"
     except Exception as exc:
         logger.warning("ai summary fail: %s", exc)
         text = f"AI 摘要生成失败：{type(exc).__name__}"
+        provider = None
 
     gen_at = dt.datetime.now(dt.timezone.utc).isoformat()
     _ai_summary_cache.update(
         {
             "ts_monotonic": now,
             "text": text,
-            "model": cfg.model_synthesis,
+            "model": provider.model if provider is not None else "",
             "generated_at_utc": gen_at,
         }
     )
     return AiSummaryResponse(
         text=text,
         generated_at_utc=gen_at,
-        model=cfg.model_synthesis,
+        model=provider.model if provider is not None else "",
         cached=False,
     )

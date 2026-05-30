@@ -8,7 +8,6 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
@@ -18,6 +17,7 @@ from app.config import get_settings
 from app.db.models import AnalystRatingRow, StockNewsRow, TickerSentimentSnapshotRow
 from app.db.session import db_session_dep
 from app.services.cache_service import cache_get, cache_set
+from app.services.llm_router import build_chat_openai, has_llm_provider
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sentiment", tags=["sentiment"])
@@ -101,7 +101,7 @@ def _mgmt_tone(symbol: str) -> dict:
         text = (data[0].get("content") or "")[:3000]
         if not text:
             return {"score": None, "note": "财报内容为空"}
-        if not cfg.openrouter_api_key:
+        if not has_llm_provider(cfg):
             pos_kws = ["record", "strong", "beat", "growth", "momentum", "solid", "accelerate"]
             neg_kws = ["headwinds", "uncertain", "slow", "miss", "decline", "challenge", "pressure"]
             pos = sum(text.lower().count(kw) for kw in pos_kws)
@@ -115,10 +115,10 @@ def _mgmt_tone(symbol: str) -> dict:
                 "quarter": data[0].get("period"),
                 "date": data[0].get("date"),
             }
-        llm = ChatOpenAI(
-            api_key=cfg.openrouter_api_key,
-            base_url=cfg.openrouter_base_url,
-            model=cfg.model_synthesis,
+        llm = build_chat_openai(
+            cfg,
+            openrouter_model=cfg.model_synthesis,
+            source="stock_sentiment_mgmt_tone",
             temperature=0.1,
             timeout=20,
             max_retries=1,
@@ -212,7 +212,7 @@ def _strategy_suggestion(
     news: Optional[int],
 ) -> str:
     cfg = get_settings()
-    if not cfg.openrouter_api_key:
+    if not has_llm_provider(cfg):
         return ""
     try:
         scores_str = (
@@ -221,10 +221,10 @@ def _strategy_suggestion(
             f"散户情绪：{social}/100  "
             f"新闻情绪：{news}/100"
         )
-        llm = ChatOpenAI(
-            api_key=cfg.openrouter_api_key,
-            base_url=cfg.openrouter_base_url,
-            model=cfg.model_synthesis,
+        llm = build_chat_openai(
+            cfg,
+            openrouter_model=cfg.model_synthesis,
+            source="stock_sentiment_dashboard",
             temperature=0.3,
             timeout=20,
             max_retries=1,

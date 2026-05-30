@@ -13,22 +13,36 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.agent import router as agent_router
+from app.api.routes.access_keys import router as access_keys_router
+from app.api.routes.admin_usage import router as admin_usage_router
 from app.api.routes.alerts import router as alerts_router
+from app.api.routes.analyst import router as analyst_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
 from app.api.routes.congress import router as congress_router
+from app.api.routes.copilot_routes import router as copilot_router
+from app.api.routes.cross_market_core import router as cross_market_core_router
+from app.api.routes.cross_market_diagnostics import router as cross_market_diag_router
 from app.api.routes.dark_pool import router as dark_pool_router
 from app.api.routes.divergence import router as divergence_router
 from app.api.routes.earnings_symbol import router as earnings_symbol_router
 from app.api.routes.feed_ai import router as feed_ai_router
 from app.api.routes.feed_unified import router as feed_unified_router
 from app.api.routes.health import router as health_router
+from app.api.routes.ibkr_routes import router as ibkr_router
 from app.api.routes.integration_status import router as integration_router
+from app.api.routes.macro import router as macro_router
+from app.api.routes.news import router as news_router
+from app.api.routes.mvp import router as mvp_router
+from app.api.routes.market_overview import router as market_overview_router
 from app.api.routes.market_dashboard import router as market_dashboard_router
+from app.api.routes.ontology_api import inspector_router, objects_router
 from app.api.routes.options import router as options_router
 from app.api.routes.profile import router as profile_router
 from app.api.routes.scanner import router as scanner_router
+from app.api.routes.signals_feed import router as signals_feed_router
+from app.api.routes.site_nav import router as site_nav_router
 from app.api.routes.social import router as social_router
 from app.api.routes.stock_detail import router as stock_detail_router
 from app.api.routes.stock_sentiment import router as stock_sentiment_router
@@ -41,6 +55,10 @@ from app.ingest.discord_history_rest import run_discord_gap_sync_loop
 from app.ingest.feed_enrichment import run_feed_enrichment_loop
 from app.logging_setup import apply_noise_filters
 from app.sync.scheduler import start_scheduler, stop_scheduler
+from app.cross_market.db_async import create_ontology_tables, init_ontology_async_db
+from app.cross_market.ontology_registry import ontology
+from app.cross_market.redis_cache import ping_redis as cm_ping_redis
+from app.cross_market import ibkr_connection as ibkr_conn
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +68,27 @@ logging.basicConfig(
 _cfg = get_settings()
 apply_noise_filters(enabled=_cfg.suppress_noisy_provider_logs)
 logger = logging.getLogger("optionsaji.main")
+
+
+def _patch_ib_insync_get_loop() -> None:
+    try:
+        import ib_insync.client as ib_client
+        import ib_insync.connection as ib_connection
+        import ib_insync.util as ib_util
+        import ib_insync.wrapper as ib_wrapper
+    except ModuleNotFoundError:
+        return
+
+    def get_loop() -> asyncio.AbstractEventLoop:
+        return asyncio.get_running_loop()
+
+    ib_util.getLoop = get_loop  # type: ignore[method-assign]
+    ib_connection.getLoop = get_loop  # type: ignore[attr-defined]
+    ib_client.getLoop = get_loop  # type: ignore[attr-defined]
+    ib_wrapper.getLoop = get_loop  # type: ignore[attr-defined]
+
+
+_patch_ib_insync_get_loop()
 
 
 def _startup_discord_listener() -> None:
@@ -67,6 +106,28 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     init_db()
 
+    init_ontology_async_db()
+    try:
+        await create_ontology_tables()
+    except Exception as exc:
+        logger.warning("ontology tables init: %s", exc)
+    try:
+        logger.info(
+            "ontology YAML: %s objects, %s patterns",
+            len(ontology.list_objects()),
+            len(ontology.list_patterns()),
+        )
+    except Exception as exc:
+        logger.warning("ontology registry: %s", exc)
+    try:
+        cm_redis = await cm_ping_redis()
+        logger.info("cross-market redis ping: %s", cm_redis)
+    except Exception as exc:
+        logger.warning("cross-market redis: %s", exc)
+    if ibkr_conn.ibkr_is_enabled():
+        logger.info("IBKR enabled -- lazy connect on first /api/ibkr or cross-market quote")
+    else:
+        logger.info("IBKR disabled (set IBKR_ENABLED=true for live Gateway quotes)")
     _startup_discord_listener()
     if cfg.discord_gap_sync_enabled:
         asyncio.create_task(run_discord_gap_sync_loop())
@@ -76,6 +137,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     start_scheduler()
 
     yield
+
+    if ibkr_conn.ibkr_is_enabled():
+        await ibkr_conn.ibkr_disconnect_shutdown()
 
     stop_scheduler()
 
@@ -131,7 +195,18 @@ def create_application() -> FastAPI:
     async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         code = "http_error"
-        if isinstance(exc.detail, str) and exc.detail.strip():
+        details: dict[str, object] = {"status_code": exc.status_code}
+        if isinstance(exc.detail, dict):
+            raw_code = exc.detail.get("code")
+            raw_message = exc.detail.get("message")
+            if isinstance(raw_code, str) and raw_code.strip():
+                code = raw_code
+            if isinstance(raw_message, str) and raw_message.strip():
+                message = raw_message
+            else:
+                message = "Request failed."
+            details.update({k: v for k, v in exc.detail.items() if k not in {"message"}})
+        elif isinstance(exc.detail, str) and exc.detail.strip():
             message = exc.detail
         else:
             message = "Request failed."
@@ -139,7 +214,7 @@ def create_application() -> FastAPI:
             error=ApiError(
                 code=code,
                 message=message,
-                details={"status_code": exc.status_code},
+                details=details,
                 request_id=request_id,
             ),
         )
@@ -178,10 +253,24 @@ def create_application() -> FastAPI:
     # ── Core routes ──
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(access_keys_router)
+    app.include_router(admin_usage_router)
+    app.include_router(site_nav_router)
     app.include_router(billing_router)
     app.include_router(agent_router)
+    app.include_router(copilot_router)
+    app.include_router(ibkr_router)
+    app.include_router(cross_market_core_router)
+    app.include_router(cross_market_diag_router)
+    app.include_router(objects_router)
+    app.include_router(inspector_router)
     app.include_router(alerts_router)
     app.include_router(integration_router)
+    # ── Macro / Market Overview (register before market_dashboard /{symbol} to avoid route hijacking) ──
+    app.include_router(macro_router)
+    app.include_router(news_router)
+    app.include_router(analyst_router)
+    app.include_router(market_overview_router)
     app.include_router(market_dashboard_router)
     app.include_router(stock_detail_router)
     app.include_router(options_router)
@@ -193,6 +282,9 @@ def create_application() -> FastAPI:
     app.include_router(feed_unified_router)
     app.include_router(feed_ai_router)
     app.include_router(brief_router)
+    app.include_router(mvp_router)
+    # ── Signals Feed ──
+    app.include_router(signals_feed_router)
     # ── V3 Alternative Data routes ──
     app.include_router(divergence_router)
     app.include_router(dark_pool_router)

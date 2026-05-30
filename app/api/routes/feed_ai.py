@@ -6,13 +6,13 @@ import json
 import logging
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
 from app.services.cache_service import TTL_AI, cache_get, cache_set
+from app.services.llm_router import has_llm_provider, post_chat_completions_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +45,9 @@ def _item_cache_key(title: str, body: str) -> str:
 
 def _call_batch_llm(prompt_block: str) -> dict[str, str]:
     cfg = get_settings()
-    key = cfg.openrouter_api_key.strip()
-    if not key:
-        raise HTTPException(status_code=503, detail="openrouter_not_configured")
+    if not has_llm_provider(cfg):
+        raise HTTPException(status_code=503, detail="llm_provider_not_configured")
 
-    model = cfg.model_synthesis.strip() or "deepseek/deepseek-chat"
     sys_msg = (
         "你是华语美股期权信息流编辑。给定若干条信息流片段（每条有 id）。"
         "请为每条写出 2~3 句中文解读：可能影响的标的或波动环境、粗略多空倾向（若非期权相关则说明信息性质）、"
@@ -58,7 +56,6 @@ def _call_batch_llm(prompt_block: str) -> dict[str, str]:
         "不得捏造具体价位或保证收益。"
     )
     payload: dict[str, object] = {
-        "model": model,
         "temperature": 0.25,
         "max_tokens": 2048,
         "messages": [
@@ -67,15 +64,12 @@ def _call_batch_llm(prompt_block: str) -> dict[str, str]:
         ],
         "response_format": {"type": "json_object"},
     }
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    url = f"{cfg.openrouter_base_url.rstrip('/')}/chat/completions"
-    with httpx.Client(timeout=120.0) as client:
-        resp = client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    data, _provider = post_chat_completions_with_fallback(
+        payload,
+        cfg=cfg,
+        source="feed_interpret_batch",
+        timeout=120.0,
+    )
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
         raise HTTPException(status_code=502, detail="empty_llm_response")

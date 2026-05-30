@@ -530,7 +530,7 @@ GET /stable/all-industry-classification              全部行业分类
 ## 17. Insider Trades 内部人交易
 
 ```
-GET /stable/insider-trading?symbol=AAPL&page=0      内部人交易记录 ⭐
+GET /stable/insider-trading/search?symbol=AAPL&limit=50  按 symbol 查内部人交易（当前可用；裸 /insider-trading 对 symbol 会 404）⭐
 GET /stable/search-insider-trading?name=Tim+Cook     搜索内部人
 GET /stable/search-insider-trading-by-reporting-name?name=  按报告人搜索
 GET /stable/all-insider-transaction-types             交易类型列表

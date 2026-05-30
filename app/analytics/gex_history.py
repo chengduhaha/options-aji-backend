@@ -7,6 +7,7 @@ import logging
 from typing import Any, Optional
 
 from app.services.cache_service import redis_client_optional
+from app.tools.yf_helpers import yf_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +72,7 @@ def seed_price_closes(symbol: str, *, days: int = 90) -> list[dict[str, Any]]:
     if not guard:
         return []
     try:
-        import yfinance as yf
-
-        t = yf.Ticker(guard)
+        t = yf_ticker(guard)
         hist = t.history(period=f"{days}d", interval="1d", auto_adjust=True)
     except Exception as exc:
         logger.debug("seed_price_closes %s: %s", guard, exc)

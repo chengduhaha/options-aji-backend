@@ -1,0 +1,52 @@
+object_type: Event
+display_name_zh: 事件
+description: |
+  Event 是 Ontology 的中心实体。一个事件被多个市场同时定价
+  (期权/Polymarket/社交/机构),是跨市场概率套利的基础单元。
+
+llm_description: |
+  当遇到"市场关注的未来不确定性"时,创建或查找对应的 Event。
+  Event 的核心价值: 把分散在四个市场的概率信号统一起来。
+
+attributes:
+  event_id:
+    type: string
+    primary_key: true
+    pattern: "Event:{type}-{ticker_or_topic}-{date}"
+  event_type:
+    type: enum
+    values: [earnings, macro_release, product_launch, geopolitical, regulatory, corporate_action, crypto_event, kol_signal]
+  title_zh:
+    type: string
+    description: "中文事件描述"
+  event_time:
+    type: datetime
+  resolution_time:
+    type: datetime
+  impact_scope:
+    type: enum
+    values: [single_stock, sector, macro, multi_asset]
+  affected_tickers:
+    type: list[string]
+  is_resolved:
+    type: boolean
+    default: false
+
+computed:
+  consensus_probability:
+    description: "四源融合后的最佳估计(0-1)"
+  probability_disagreement:
+    description: "四源方差,越大越值得关注"
+  is_arbitrage_opportunity:
+    type: boolean
+    rule: "probability_disagreement > 0.15"
+
+bindings:
+  options:
+    required: [ticker, expiry, target_price, direction]
+  polymarket:
+    required: [market_slug]
+  social:
+    required: [keywords, ticker]
+  institutional:
+    required: [ticker, signal_types]

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 import httpx
@@ -25,6 +26,22 @@ class FMPClient:
     def __init__(self, api_key: str, base_url: str = "https://financialmodelingprep.com/stable"):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self._http = httpx.Client(timeout=DEFAULT_TIMEOUT)
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> FMPClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # ── low-level ──────────────────────────────────────────────────────────────
 
@@ -33,15 +50,14 @@ class FMPClient:
         p = {"apikey": self.api_key, **(params or {})}
         for attempt in range(retries + 1):
             try:
-                with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-                    resp = client.get(url, params=p)
-                    if resp.status_code == 429:
-                        wait = float(resp.headers.get("Retry-After", "2"))
-                        logger.warning("FMP rate limited, waiting %.1fs", wait)
-                        time.sleep(wait)
-                        continue
-                    resp.raise_for_status()
-                    return resp.json()
+                resp = self._http.get(url, params=p)
+                if resp.status_code == 429:
+                    wait = float(resp.headers.get("Retry-After", "2"))
+                    logger.warning("FMP rate limited, waiting %.1fs", wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
             except httpx.HTTPStatusError as exc:
                 if attempt == retries:
                     logger.warning("FMP HTTP %s %s: %s", exc.response.status_code, path, exc.response.text[:200])
@@ -94,6 +110,13 @@ class FMPClient:
         if isinstance(data, list) and data:
             return data[0]
         return None
+
+    def get_insider_trades(self, symbol: str, limit: int = 50) -> list[dict]:
+        data = self._get(
+            "/insider-trading/search",
+            {"symbol": symbol.upper(), "limit": limit},
+        )
+        return data if isinstance(data, list) else []
 
     def get_aftermarket_quote(self, symbol: str) -> Optional[dict]:
         data = self._get("/aftermarket-quote", {"symbol": symbol.upper()})
@@ -261,19 +284,51 @@ class FMPClient:
         return None
 
     def get_all_index_quotes(self) -> list[dict]:
-        """FMP Stable API removed all-index-quotes; fetch known major indices individually via /quote."""
-        # Major US indices + common global indices
+        """FMP Stable API removed all-index-quotes; batch / batch-quote-short first, then parallel /quote."""
         major_symbols = [
             "^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX",
             "^NYA", "^XAX", "^BATSK",
             "^FTSE", "^N225", "^HSI", "^STOXX50E",
         ]
-        results = []
-        for sym in major_symbols:
-            data = self._get("/quote", {"symbol": sym})
-            if isinstance(data, list) and data:
-                results.append(data[0])
-        return results
+        batch = self.get_batch_quote_short(major_symbols)
+        if isinstance(batch, list) and batch:
+            by_sym = {
+                str(d.get("symbol")): d
+                for d in batch
+                if isinstance(d, dict) and d.get("symbol") is not None
+            }
+            ordered = [by_sym[s] for s in major_symbols if s in by_sym]
+            if len(ordered) >= min(8, len(major_symbols)):
+                return ordered
+
+        def fetch_one(sym: str) -> tuple[str, Optional[dict]]:
+            url = f"{self.base_url}/quote"
+            p = {"apikey": self.api_key, "symbol": sym}
+            try:
+                with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+                    resp = client.get(url, params=p)
+                    if resp.status_code == 429:
+                        wait = float(resp.headers.get("Retry-After", "2"))
+                        logger.warning("FMP rate limited (parallel index), waiting %.1fs", wait)
+                        time.sleep(wait)
+                        resp = client.get(url, params=p)
+                    resp.raise_for_status()
+                    data = resp.json()
+            except Exception as exc:
+                logger.warning("FMP parallel quote %s: %s", sym, exc)
+                return sym, None
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                return sym, data[0]
+            return sym, None
+
+        found: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(fetch_one, s): s for s in major_symbols}
+            for fut in as_completed(futures):
+                sym, row = fut.result()
+                if row is not None:
+                    found[sym] = row
+        return [found[s] for s in major_symbols if s in found]
 
     def get_sp500_components(self) -> list[dict]:
         return self._get("/sp500-index") or []

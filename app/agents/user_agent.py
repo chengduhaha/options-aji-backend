@@ -7,7 +7,6 @@ import logging
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from typing_extensions import TypedDict
 
 from app.agents.user_agent_helpers import (
@@ -17,6 +16,14 @@ from app.agents.user_agent_helpers import (
 from app.config import get_settings
 from app.tools.openbb_tools import build_default_toolkit
 from app.clients.fmp_client import get_fmp_client
+from app.clients.massive_client import get_massive_client
+from app.services.options_playbook import (
+    build_fast_summary_blob,
+    build_playbook_context_blob,
+    select_sections_for_context,
+)
+from app.services.llm_router import build_chat_openai, has_llm_provider
+from app.services.social_sentiment import _fetch_xpoz_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,7 @@ def _fetch_real_data_context(symbol: str) -> dict[str, object]:
     ctx: dict[str, object] = {"symbol": symbol}
     tk = build_default_toolkit()
     cfg = get_settings()
+    bar: dict[str, object] = {}
 
     # 1. Quote + market bar
     try:
@@ -136,7 +144,52 @@ def _fetch_real_data_context(symbol: str) -> dict[str, object]:
         except Exception:
             pass
 
-    # 5. Earnings context
+        try:
+            fmp = get_fmp_client()
+            insider = fmp.get_insider_trades(symbol)
+            if isinstance(insider, list) and insider:
+                ctx["insider_trades"] = insider[:10]
+        except Exception:
+            pass
+
+        try:
+            fmp = get_fmp_client()
+            income = fmp.get_income_statement(symbol)
+            balance = fmp.get_balance_sheet(symbol)
+            financials: dict[str, object] = {}
+            if isinstance(income, list) and income:
+                financials["income_statement"] = income[:4]
+            if isinstance(balance, list) and balance:
+                financials["balance_sheet"] = balance[:4]
+            if financials:
+                ctx["financials"] = financials
+        except Exception:
+            pass
+
+    # 5. Social sentiment from xpoz
+    try:
+        social = _fetch_xpoz_sentiment(symbol)
+        if social is not None:
+            if hasattr(social, "model_dump"):
+                ctx["social_sentiment"] = social.model_dump()
+            else:
+                ctx["social_sentiment"] = social
+    except Exception:
+        pass
+
+    # 6. Massive option chain depth snapshot
+    if getattr(cfg, "massive_api_key", "").strip():
+        try:
+            contracts = get_massive_client().get_option_chain_snapshot(symbol)
+            if isinstance(contracts, list) and contracts:
+                ctx["massive_option_chain_depth"] = {
+                    "contracts_count": len(contracts),
+                    "sample": contracts[:20],
+                }
+        except Exception:
+            pass
+
+    # 7. Earnings context
     try:
         ctx["earnings"] = tk.snapshot_bundle(symbol).get("earnings")
     except Exception:
@@ -169,14 +222,13 @@ def fetch_market_bundle(state: UserAgentState) -> dict[str, str]:
 
 def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
     cfg = get_settings()
-    api_key = cfg.openrouter_api_key.strip()
-    if not api_key:
-        return {"answer": "服务端未配置 OPENROUTER_API_KEY，无法调用语言模型。"}
+    if not has_llm_provider(cfg):
+        return {"answer": "服务端未配置 LLM Provider，无法调用语言模型。"}
 
-    llm = ChatOpenAI(
-        api_key=api_key,
-        base_url=cfg.openrouter_base_url,
-        model=cfg.model_synthesis,
+    llm = build_chat_openai(
+        cfg,
+        openrouter_model=cfg.model_synthesis,
+        source="user_agent",
         temperature=0.25,
         timeout=120,
         max_retries=2,
@@ -222,6 +274,19 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
     }
 
     sys_prompt = base_prompt + mode_instructions.get(mode, mode_instructions["fast"])
+
+    if mode == "fast":
+        playbook_blob = build_fast_summary_blob()
+    else:
+        agent_mode = "strategy" if mode == "strategy" else "analysis"
+        section_ids = select_sections_for_context(mode=agent_mode)
+        playbook_blob = build_playbook_context_blob(section_ids)
+    if playbook_blob:
+        sys_prompt += (
+            "\n\n以下为期权内训教材摘录，回答时可引用 DTE、IV Rank、Greeks、Expected Move、异动五步法，"
+            "勿照搬为投资建议：\n"
+            f"{playbook_blob}\n"
+        )
 
     human = HumanMessage(
         content=(

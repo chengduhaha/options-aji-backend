@@ -16,10 +16,11 @@ ALGORITHM = "HS256"
 
 def _secret() -> str:
     s = get_settings().jwt_secret_key.strip()
-    if s:
-        return s
-    logger.warning("JWT_SECRET_KEY unset; using insecure dev fallback")
-    return "optionsaji-dev-insecure-jwt-secret"
+    if not s:
+        raise RuntimeError(
+            "未配置 JWT_SECRET_KEY（或为空）：请在环境变量或 settings.toml 中设置强随机密钥后再启动服务。"
+        )
+    return s
 
 
 def create_access_token(*, user_id: str, email: str, role: str) -> str:

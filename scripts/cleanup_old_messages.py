@@ -19,7 +19,7 @@ def main() -> int:
         removed = cleanup_retention(session)
 
     print(
-        f"cleanup_old_messages.py: retention_days={settings.retention_days} deleted_rows≈{removed}",
+        f"cleanup_old_messages.py: discord_retention_hours={settings.discord_retention_hours} deleted_rows≈{removed}",
         flush=True,
     )
     return 0

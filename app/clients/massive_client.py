@@ -27,16 +27,31 @@ class MassiveClient:
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
         }
+        self._http = httpx.Client(timeout=DEFAULT_TIMEOUT, headers=self._headers)
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> MassiveClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # ── low-level ──────────────────────────────────────────────────────────────
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         try:
-            with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-                resp = client.get(url, headers=self._headers, params=params or {})
-                resp.raise_for_status()
-                return resp.json()
+            resp = self._http.get(url, params=params or {})
+            resp.raise_for_status()
+            return resp.json()
         except httpx.HTTPStatusError as exc:
             logger.warning("Massive HTTP %s %s: %s", exc.response.status_code, url, exc.response.text[:200])
             return {"error": str(exc), "status_code": exc.response.status_code}
@@ -126,11 +141,10 @@ class MassiveClient:
 
         while url and len(results) < cap and pages < page_cap:
             try:
-                with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-                    use_params = params if pages == 0 else None
-                    resp = client.get(url, headers=self._headers, params=use_params)
-                    resp.raise_for_status()
-                    data = resp.json()
+                use_params = params if pages == 0 else None
+                resp = self._http.get(url, params=use_params)
+                resp.raise_for_status()
+                data = resp.json()
             except Exception as exc:
                 logger.warning("Massive chain snapshot %s: %s", underlying, exc)
                 break

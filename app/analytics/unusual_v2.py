@@ -184,6 +184,8 @@ def score_snapshot_rows(
             if str(getattr(r, "contract_type", "")).lower().startswith("c")
             else "put"
         )
+        snap_at = getattr(r, "snapshot_time", None)
+        lt_at = getattr(r, "last_trade_at", None)
         out.append(
             {
                 "score": sc,
@@ -200,6 +202,10 @@ def score_snapshot_rows(
                 "delta": getattr(r, "delta", None),
                 "bid": getattr(r, "bid", None),
                 "ask": getattr(r, "ask", None),
+                "lastTradeAt": lt_at.isoformat() if hasattr(lt_at, "isoformat") else None,
+                "lastTradePrice": getattr(r, "last_trade_price", None),
+                "lastTradeSize": getattr(r, "last_trade_size", None),
+                "snapshotTime": snap_at.isoformat() if hasattr(snap_at, "isoformat") else None,
             }
         )
     return out

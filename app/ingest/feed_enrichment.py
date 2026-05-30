@@ -9,7 +9,6 @@ import logging
 import re
 from typing import Callable, Optional
 
-import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
@@ -17,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.db.models import DiscordMessageRow, MessageEnrichmentRow
 from app.db.session import SessionLocal
+from app.services.llm_router import has_llm_provider, post_chat_completions_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +52,7 @@ def _call_openrouter_enrich(
     plaintext: str,
     author: Optional[str],
 ) -> _EnrichmentLLMOut | None:
-    key = cfg.openrouter_api_key.strip()
-    if not key:
+    if not has_llm_provider(cfg):
         return None
 
     sys_prompt = (
@@ -67,7 +66,6 @@ def _call_openrouter_enrich(
     )
     user_block = f"作者: {author or 'unknown'}\n\n原文:\n{plaintext[:_MAX_INPUT_CHARS]}"
     payload: dict[str, object] = {
-        "model": _enrichment_model_id(cfg),
         "temperature": 0.2,
         "max_tokens": 1024,
         "messages": [
@@ -76,18 +74,16 @@ def _call_openrouter_enrich(
         ],
         "response_format": {"type": "json_object"},
     }
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    url = f"{cfg.openrouter_base_url.rstrip('/')}/chat/completions"
     try:
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
-        logger.exception("OpenRouter enrichment HTTP error: %s", exc)
+        data, _provider = post_chat_completions_with_fallback(
+            payload,
+            cfg=cfg,
+            openrouter_model=_enrichment_model_id(cfg),
+            source="feed_enrichment",
+            timeout=120.0,
+        )
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        logger.exception("LLM enrichment HTTP error: %s", exc)
         return None
 
     try:
@@ -118,7 +114,7 @@ def process_pending_enrichments(
     cfg = get_settings()
     if not cfg.feed_enrichment_enabled:
         return 0
-    if not cfg.openrouter_api_key.strip():
+    if not has_llm_provider(cfg):
         return 0
 
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
@@ -191,7 +187,7 @@ async def run_feed_enrichment_loop() -> None:
         await asyncio.sleep(float(interval))
         if not cfg.feed_enrichment_enabled:
             continue
-        if not cfg.openrouter_api_key.strip():
+        if not has_llm_provider(cfg):
             continue
 
         batch = max(1, int(cfg.feed_enrichment_batch_size))

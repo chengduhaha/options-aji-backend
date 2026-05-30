@@ -1,0 +1,25 @@
+pattern_id: crossover_probability_divergence
+pattern_type: crossover
+display_name_zh: 跨市场概率背离扫描
+time_budget_seconds: 60
+runs_periodically: true
+schedule: "*/10 * * * *"
+
+reasoning_chain:
+  - step: 1
+    action: scan_all_active_events
+    output: events
+  - step: 2
+    for_each: "events"
+    action: compute_four_source_probability
+  - step: 3
+    action: filter_high_disagreement
+    input: {threshold: 0.15}
+  - step: 4
+    for_each: "filtered_events"
+    action: generate_arbitrage_signal
+    output: CrossMarketArbitrage[]
+
+output_template:
+  type: opportunity_list
+  rank_by: max_disagreement

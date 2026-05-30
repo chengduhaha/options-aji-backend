@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
+
 from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
 from app.db.models import (
@@ -167,20 +169,27 @@ def sync_treasury_rates_pipeline() -> None:
             except ValueError:
                 continue
 
+            row_data = {
+                "month1": r.get("month1"),
+                "month2": r.get("month2"),
+                "month3": r.get("month3"),
+                "month6": r.get("month6"),
+                "year1": r.get("year1"),
+                "year2": r.get("year2"),
+                "year5": r.get("year5"),
+                "year10": r.get("year10"),
+                "year30": r.get("year30"),
+                "synced_at": datetime.now(timezone.utc),
+            }
+
             existing = session.get(TreasuryRateRow, rate_date)
-            if not existing:
+            if existing:
+                for field, value in row_data.items():
+                    setattr(existing, field, value)
+            else:
                 session.add(TreasuryRateRow(
                     rate_date=rate_date,
-                    month1=r.get("month1"),
-                    month2=r.get("month2"),
-                    month3=r.get("month3"),
-                    month6=r.get("month6"),
-                    year1=r.get("year1"),
-                    year2=r.get("year2"),
-                    year5=r.get("year5"),
-                    year10=r.get("year10"),
-                    year30=r.get("year30"),
-                    synced_at=datetime.now(timezone.utc),
+                    **row_data,
                 ))
 
         session.commit()
@@ -268,8 +277,6 @@ def sync_news_pipeline() -> None:
                 pub_dt = datetime.now(timezone.utc)
 
             url = a.get("url", "")
-            # Skip duplicates by URL
-            from sqlalchemy import select
             existing = session.execute(
                 select(StockNewsRow).where(StockNewsRow.url == url)
             ).scalar_one_or_none()
@@ -290,6 +297,12 @@ def sync_news_pipeline() -> None:
             ))
 
         session.commit()
+        for symbol in symbols:
+            cache_set(
+                key_stock_news(symbol),
+                {"articles": articles[:20], "source": "sync"},
+                ttl=TTL_WARM,
+            )
         logger.info("News sync: %d articles processed", len(articles))
     except Exception as exc:
         session.rollback()
@@ -314,6 +327,16 @@ def sync_analyst_ratings_pipeline() -> None:
                     r_date = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else None
                 except ValueError:
                     r_date = None
+
+                existing = session.execute(
+                    select(AnalystRatingRow).where(
+                        AnalystRatingRow.symbol == symbol,
+                        AnalystRatingRow.rating_date == r_date,
+                        AnalystRatingRow.analyst_company == r.get("gradingCompany"),
+                    )
+                ).scalar_one_or_none()
+                if existing:
+                    continue
 
                 session.add(AnalystRatingRow(
                     symbol=symbol,

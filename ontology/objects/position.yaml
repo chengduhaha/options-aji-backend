@@ -1,0 +1,21 @@
+object_type: Position
+display_name_zh: 持仓
+
+attributes:
+  position_id:
+    type: string
+    primary_key: true
+  trader_id:
+    type: string
+    references: Trader
+  ticker:
+    type: string
+  instrument_type:
+    type: enum
+    values: [stock, option, polymarket]
+  quantity:
+    type: float
+  avg_cost:
+    type: float
+  opened_at:
+    type: datetime

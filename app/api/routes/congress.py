@@ -24,13 +24,22 @@ _TTL = 1800  # 30 min
 
 
 def _fetch_from_fmp(chamber: str, limit: int = 200) -> list[dict]:
-    """Fetch congress trades from FMP senate-trading / house-trading endpoint."""
+    """Fetch congress trades from FMP senate-trading / house-trading endpoint.
+
+    Note: FMP congress endpoints live under /api/v4/, not /stable/.
+    """
     cfg = get_settings()
     if not cfg.fmp_api_key:
         return []
     endpoint = "/senate-trading" if chamber == "senate" else "/house-trading"
     try:
-        data = get_fmp_client()._get(endpoint, {"limit": limit}) or []
+        import httpx
+        url = f"https://financialmodelingprep.com/api/v4{endpoint}"
+        params = {"limit": limit, "apikey": cfg.fmp_api_key}
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
         return data if isinstance(data, list) else []
     except Exception as exc:
         logger.warning("FMP congress (%s): %s", chamber, exc)

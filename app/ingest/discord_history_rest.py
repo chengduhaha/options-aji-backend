@@ -17,6 +17,7 @@ from typing import Callable, Optional
 import httpx
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db.session import SessionLocal
 from app.ingest.discord_bot import parse_channel_ids
 from app.ingest.message_store import max_message_id_for_channel, upsert_discord_row

@@ -1,0 +1,57 @@
+pattern_id: investigative_geopolitical_cascade
+pattern_type: investigative
+display_name_zh: 地缘政治连锁反应分析
+time_budget_seconds: 300
+
+triggers:
+  - news_keywords: [strait, sanction, war, treaty, oil_supply]
+  - polymarket_category: [geopolitics, macro]
+    price_change_24h_abs: 0.15
+
+reasoning_chain:
+  - step: 1
+    action: llm_research
+    sub_agent: FundamentalResearchAgent
+    input:
+      query: "{event.title_zh} 最新进展、各方表态、历史先例"
+      sources: [reuters, bloomberg, xinhua]
+  - step: 2
+    action: polymarket_search_and_quote
+    input: {query_keywords: "{event.keywords}", min_liquidity: 50000}
+  - step: 3
+    action: ontology_trace_impact_chain
+    input:
+      event_id: "{event.event_id}"
+      depth: 3
+      causal_rules:
+        - if: strait_closure
+          then: [oil_supply_disruption, shipping_route_change]
+        - if: oil_supply_disruption
+          then: [oil_price_up, energy_stocks_up, airline_stocks_down]
+        - if: geopolitical_tension
+          then: [gold_up, treasury_up, vix_up]
+  - step: 4
+    action: get_options_landscape
+    input: {tickers: "{step_3.affected_tickers}"}
+  - step: 5
+    action: sentiment_quantify
+    sub_agent: SentimentAnalyst
+    input: {keywords: "{event.keywords}", window: "72h"}
+  - step: 6
+    action: probability_fusion
+    input:
+      sources:
+        - {source: research, weight: 0.25}
+        - {source: polymarket, weight: 0.35}
+        - {source: options, weight: 0.20}
+        - {source: sentiment, weight: 0.20}
+  - step: 7
+    action: design_multi_asset_portfolio
+    input:
+      event_probability: "{step_6.fused_prob}"
+      affected_assets: "{step_3.affected}"
+      max_capital_usd: "{trader.position_limit}"
+
+output_template:
+  type: investigative_report
+  sections: [probability_judgment, impact_chain, portfolio_table, risk_signals]

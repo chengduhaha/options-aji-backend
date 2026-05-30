@@ -1,0 +1,18 @@
+object_type: Trader
+display_name_zh: 交易者
+
+attributes:
+  trader_id:
+    type: string
+    primary_key: true
+  display_name:
+    type: string
+  risk_profile:
+    type: enum
+    values: [conservative, balanced, aggressive]
+  max_position_usd:
+    type: float
+  preferred_markets:
+    type: list[string]
+  created_at:
+    type: datetime

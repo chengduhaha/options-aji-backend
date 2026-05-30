@@ -40,16 +40,36 @@ def start_scheduler() -> None:
     global _scheduler
     cfg = get_settings()
 
-    if not cfg.sync_enabled:
-        logger.info("Data sync disabled (SYNC_ENABLED=false)")
-        return
-
     if _scheduler and _scheduler.running:
         logger.warning("Scheduler already running")
         return
 
     tz = pytz.timezone(cfg.sync_timezone)
     _scheduler = BackgroundScheduler(timezone=tz)
+
+    from app.db.session import SessionLocal
+    from app.ingest.message_store import cleanup_retention
+
+    def _discord_retention_cleanup() -> None:
+        with SessionLocal() as session:
+            cleanup_retention(session)
+
+    # ── Hourly: purge Discord rows older than discord_retention_hours (default 48h) ──
+    _scheduler.add_job(
+        lambda: _run_safe(_discord_retention_cleanup, "discord_retention"),
+        IntervalTrigger(hours=1),
+        id="discord_retention",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    if not cfg.sync_enabled:
+        _scheduler.start()
+        logger.info(
+            "Scheduler started (sync pipelines disabled); discord_retention job active, hours=%s",
+            cfg.discord_retention_hours,
+        )
+        return
 
     # ── Import pipelines lazily to avoid circular imports ─────────────────────────────────────
     from app.sync.pipelines.options_chain_sync import sync_options_chain_pipeline
@@ -63,6 +83,7 @@ def start_scheduler() -> None:
         sync_news_pipeline,
         sync_analyst_ratings_pipeline,
     )
+    from app.sync.pipelines.company_profile_sync import sync_company_profiles_pipeline
     from app.services.social_sentiment import ingest_all_social_pipelines
 
     # ── Every 15 min during market hours ──────────────────────────────────────────────
@@ -96,9 +117,16 @@ def start_scheduler() -> None:
         id="news", replace_existing=True, max_instances=1,
     )
     _scheduler.add_job(
-        lambda: _run_safe(ingest_all_social_pipelines, "social_sentiment"),
+        lambda: _market_hours_guard() and _run_safe(ingest_all_social_pipelines, "social_sentiment"),
         IntervalTrigger(minutes=10),
         id="social_sentiment", replace_existing=True, max_instances=1,
+    )
+
+    # ── Every 30 min during market hours ───────────────────────────────────────
+    _scheduler.add_job(
+        lambda: _market_hours_guard() and _run_safe(sync_company_profiles_pipeline, "company_profiles"),
+        IntervalTrigger(minutes=30),
+        id="company_profiles", replace_existing=True, max_instances=1,
     )
 
     # ── Daily 6:30 AM ET (pre-market) ───────────────────────────────────────────────

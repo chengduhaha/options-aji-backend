@@ -16,10 +16,21 @@ massive_ws_url = "wss://delayed.massive.com/options"
 fmp_api_key = ""
 fmp_base_url = "https://financialmodelingprep.com/stable"
 
+futu_enabled = false
+futu_host = "127.0.0.1"
+futu_port = 11111
+futu_snapshot_batch_size = 200
+futu_cache_ttl_seconds = 3
+futu_connect_timeout_seconds = 0.3
+
 openrouter_api_key = ""
 openrouter_base_url = "https://openrouter.ai/api/v1"
 model_parse = "deepseek/deepseek-chat"
 model_synthesis = "deepseek/deepseek-chat"
+
+xiaomi_api_key = ""
+xiaomi_base_url = "https://api.mimo-v2.com/v1"
+xiaomi_model = "mimo-v2.5"
 
 discord_bot_token = ""
 discord_channel_ids = ""

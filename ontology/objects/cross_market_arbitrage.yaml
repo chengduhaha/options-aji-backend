@@ -1,0 +1,32 @@
+object_type: CrossMarketArbitrage
+display_name_zh: 跨市场套利信号
+description: 当同一 Event 在不同市场的概率差异 > 15% 时生成
+
+attributes:
+  arbitrage_id:
+    type: string
+    primary_key: true
+  event_id:
+    type: string
+    references: Event
+  options_probability:
+    type: float
+  polymarket_probability:
+    type: float
+  social_probability:
+    type: float
+  institutional_probability:
+    type: float
+  max_disagreement:
+    type: float
+  arbitrage_direction:
+    type: enum
+    values: [options_underpriced, options_overpriced, polymarket_overpriced, polymarket_underpriced, complex]
+  suggested_strategy:
+    type: string
+  expected_ev_pct:
+    type: float
+  confidence_score:
+    type: float
+  ai_narrative_zh:
+    type: string

@@ -1,6 +1,7 @@
 """SQLAlchemy ORM models — supports both SQLite (dev) and PostgreSQL (prod)."""
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -80,6 +81,62 @@ class UsageDailyRow(Base):
     api_key: Mapped[str] = mapped_column(String(256), primary_key=True)
     usage_date: Mapped[str] = mapped_column(String(10), primary_key=True)
     agent_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class AccessKeyRow(Base):
+    """Manual trial/paid access keys for early-stage MVP entitlement."""
+
+    __tablename__ = "access_keys"
+    __table_args__ = (
+        Index("idx_access_keys_prefix", "key_prefix"),
+        Index("idx_access_keys_status_exp", "status", "expires_at"),
+    )
+
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    key_type: Mapped[str] = mapped_column(String(16), nullable=False, default="trial")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    bound_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    bound_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    bound_device_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    max_devices: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
+class LlmUsageRow(Base):
+    """Persisted LLM token/cost usage for admin cost monitoring."""
+
+    __tablename__ = "llm_usage"
+    __table_args__ = (
+        Index("idx_llm_usage_created_provider", "created_at", "provider"),
+        Index("idx_llm_usage_source", "source"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
 
 # ─── Reference Data (low-freq) ────────────────────────────────────────────────
@@ -187,9 +244,25 @@ class OptionsSnapshotRow(Base):
     previous_close: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     break_even_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     underlying_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_trade_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_trade_size: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_trade_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     snapshot_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class SiteNavSettingsRow(Base):
+    """Global sidebar visibility — admin toggles, applies to non-admin users."""
+
+    __tablename__ = "site_nav_settings"
+
+    key: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    visibility: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    updated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
 
 
 # ─── Historical Bars (time-series) ───────────────────────────────────────────

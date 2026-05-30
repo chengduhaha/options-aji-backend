@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps_auth import get_current_admin_user, get_current_user
 from app.config import Settings, get_settings
+from app.db.models import AccessKeyRow
 from app.db.models_user import UserEmailVerificationRow, UserRow
 from app.db.session import db_session_dep
 from app.services.auth_rate_limit import (
@@ -22,6 +23,7 @@ from app.services.auth_rate_limit import (
     record_login_failure,
     register_rate_limited,
 )
+from app.services.email_sender import EmailSendError, is_email_configured, send_verification_email
 from app.services.jwt_tokens import create_access_token
 from app.services.passwords import hash_password, verify_password
 
@@ -94,6 +96,22 @@ class UserPublic(BaseModel):
     email_verified: bool
 
 
+class UserAccessKeySummary(BaseModel):
+    total: int = 0
+    active: int = 0
+    revoked: int = 0
+    latest_key_prefix: Optional[str] = None
+    latest_key_type: Optional[str] = None
+    latest_status: Optional[str] = None
+    latest_days_remaining: Optional[int] = None
+    latest_expires_at: Optional[datetime] = None
+    latest_last_used_at: Optional[datetime] = None
+
+
+class AdminUserPublic(UserPublic):
+    access_keys: UserAccessKeySummary = Field(default_factory=UserAccessKeySummary)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -112,6 +130,16 @@ class RegisterVerifyBody(BaseModel):
     code: str = Field(min_length=4, max_length=32)
 
 
+class ResendVerificationBody(BaseModel):
+    email: EmailStr
+
+
+class ResendVerificationResponse(BaseModel):
+    verification_required: bool = True
+    verification_expires_at: datetime
+    verification_code: Optional[str] = None
+
+
 class AdminUserPatchBody(BaseModel):
     role: Literal["user", "admin", "disabled"]
 
@@ -127,12 +155,62 @@ def _to_public(row: UserRow) -> UserPublic:
     )
 
 
+def _days_remaining(value: Optional[datetime]) -> Optional[int]:
+    if value is None:
+        return None
+    dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    delta = dt - datetime.now(timezone.utc)
+    return max(0, int(delta.total_seconds() // 86400))
+
+
+def _access_key_summary_for(row: UserRow, keys: list[AccessKeyRow]) -> UserAccessKeySummary:
+    matched = [
+        key
+        for key in keys
+        if key.bound_user_id == row.id or (key.bound_email or "").strip().lower() == row.email.strip().lower()
+    ]
+    latest = sorted(
+        matched,
+        key=lambda key: key.last_used_at or key.activated_at or key.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )[0] if matched else None
+    return UserAccessKeySummary(
+        total=len(matched),
+        active=sum(1 for key in matched if key.status == "active"),
+        revoked=sum(1 for key in matched if key.status == "revoked"),
+        latest_key_prefix=latest.key_prefix if latest else None,
+        latest_key_type=latest.key_type if latest else None,
+        latest_status=latest.status if latest else None,
+        latest_days_remaining=_days_remaining(latest.expires_at) if latest else None,
+        latest_expires_at=latest.expires_at if latest else None,
+        latest_last_used_at=latest.last_used_at if latest else None,
+    )
+
+
+def _to_admin_public(row: UserRow, keys: list[AccessKeyRow]) -> AdminUserPublic:
+    base = _to_public(row).model_dump()
+    return AdminUserPublic(**base, access_keys=_access_key_summary_for(row, keys))
+
+
 def _hash_verification_code(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
 
 def _generate_verification_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _invalidate_pending_verifications(session: Session, user_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    pending = session.execute(
+        select(UserEmailVerificationRow).where(
+            UserEmailVerificationRow.user_id == user_id,
+            UserEmailVerificationRow.consumed_at.is_(None),
+        )
+    ).scalars().all()
+    for row in pending:
+        row.consumed_at = now
+        session.add(row)
 
 
 def _issue_verification_code(
@@ -147,6 +225,7 @@ def _issue_verification_code(
             detail={"code": "user_not_ready", "message": "用户创建失败，请稍后重试。"},
         )
     now = datetime.now(timezone.utc)
+    _invalidate_pending_verifications(session, user.id)
     ttl_seconds = max(60, int(settings.auth_verification_code_ttl_seconds))
     code = _generate_verification_code()
     verification = UserEmailVerificationRow(
@@ -157,6 +236,59 @@ def _issue_verification_code(
     )
     session.add(verification)
     return verification, code
+
+
+def _deliver_verification_email(
+    *,
+    settings: Settings,
+    to_email: str,
+    code: str,
+    expires_at: datetime,
+) -> None:
+    if not is_email_configured(settings):
+        if settings.auth_verification_debug_expose_code:
+            logger.warning(
+                "Email delivery not configured; code only exposed in debug response for %s",
+                to_email,
+            )
+            return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "email_not_configured",
+                "message": "邮件服务未配置，暂时无法发送验证码。",
+            },
+        )
+    try:
+        send_verification_email(
+            to_email=to_email,
+            code=code,
+            expires_at=expires_at,
+            settings=settings,
+        )
+    except EmailSendError as exc:
+        logger.exception("Verification email failed to=%s", to_email)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "email_send_failed",
+                "message": "验证码邮件发送失败，请稍后重试。",
+            },
+        ) from exc
+
+
+def _register_response(
+    *,
+    row: UserRow,
+    verification: UserEmailVerificationRow,
+    code: str,
+    settings: Settings,
+) -> RegisterResponse:
+    return RegisterResponse(
+        user=_to_public(row),
+        verification_expires_at=verification.expires_at,
+        verification_code=code if settings.auth_verification_debug_expose_code else None,
+    )
 
 
 def _latest_pending_verification(session: Session, user_id: str) -> Optional[UserEmailVerificationRow]:
@@ -199,10 +331,38 @@ async def register(
 
     exists = session.execute(select(UserRow).where(UserRow.email == email)).scalar_one_or_none()
     if exists is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "email_taken", "message": "该邮箱已注册。"},
+        if exists.email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "email_taken", "message": "该邮箱已注册。"},
+            )
+        if not verify_password(body.password, exists.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "email_taken", "message": "该邮箱已注册。"},
+            )
+        verification, code = _issue_verification_code(session=session, user=exists, settings=settings)
+        try:
+            _deliver_verification_email(
+                settings=settings,
+                to_email=email,
+                code=code,
+                expires_at=verification.expires_at,
+            )
+        except HTTPException:
+            session.rollback()
+            raise
+        session.commit()
+        session.refresh(exists)
+        session.refresh(verification)
+        logger.info(
+            "Verification re-issued for unverified user id=%s email=%s ip=%s verification_id=%s",
+            exists.id,
+            email,
+            ip,
+            verification.id,
         )
+        return _register_response(row=exists, verification=verification, code=code, settings=settings)
 
     role = "admin" if email in _admin_emails(settings) else "user"
     row = UserRow(
@@ -215,6 +375,16 @@ async def register(
     session.add(row)
     session.flush()
     verification, code = _issue_verification_code(session=session, user=row, settings=settings)
+    try:
+        _deliver_verification_email(
+            settings=settings,
+            to_email=email,
+            code=code,
+            expires_at=verification.expires_at,
+        )
+    except HTTPException:
+        session.rollback()
+        raise
     session.commit()
     session.refresh(row)
     session.refresh(verification)
@@ -227,8 +397,57 @@ async def register(
         ip,
         verification.id,
     )
-    return RegisterResponse(
-        user=_to_public(row),
+    return _register_response(row=row, verification=verification, code=code, settings=settings)
+
+
+@router.post("/register/resend", response_model=ResendVerificationResponse)
+async def register_resend(
+    body: ResendVerificationBody,
+    request: Request,
+    session: Session = Depends(db_session_dep),
+) -> ResendVerificationResponse:
+    settings = get_settings()
+    ip = _client_ip(request)
+    if register_rate_limited(ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "rate_limited", "message": "请求过于频繁，请稍后再试。"},
+        )
+
+    email = _norm_email(str(body.email))
+    row = session.execute(select(UserRow).where(UserRow.email == email)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "user_not_found", "message": "该邮箱尚未注册。"},
+        )
+    if row.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "already_verified", "message": "该邮箱已完成验证，请直接登录。"},
+        )
+
+    verification, code = _issue_verification_code(session=session, user=row, settings=settings)
+    try:
+        _deliver_verification_email(
+            settings=settings,
+            to_email=email,
+            code=code,
+            expires_at=verification.expires_at,
+        )
+    except HTTPException:
+        session.rollback()
+        raise
+    session.commit()
+    session.refresh(verification)
+    logger.info(
+        "Verification resent user_id=%s email=%s ip=%s verification_id=%s",
+        row.id,
+        email,
+        ip,
+        verification.id,
+    )
+    return ResendVerificationResponse(
         verification_expires_at=verification.expires_at,
         verification_code=code if settings.auth_verification_debug_expose_code else None,
     )
@@ -268,7 +487,7 @@ async def register_verify(
         logger.warning("Verify failed: no active verification user_id=%s email=%s", row.id, email)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "verification_not_found", "message": "验证码已失效，请重新注册。"},
+            detail={"code": "verification_not_found", "message": "验证码已失效，请重新发送验证码。"},
         )
 
     now = datetime.now(timezone.utc)
@@ -276,12 +495,12 @@ async def register_verify(
     if verify.attempts >= max_attempts:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"code": "too_many_attempts", "message": "验证码尝试次数过多，请重新注册。"},
+            detail={"code": "too_many_attempts", "message": "验证码尝试次数过多，请重新发送验证码。"},
         )
     if _ensure_utc(verify.expires_at) < now:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "code_expired", "message": "验证码已过期，请重新注册。"},
+            detail={"code": "code_expired", "message": "验证码已过期，请重新发送验证码。"},
         )
 
     if verify.code_hash != _hash_verification_code(code):
@@ -358,13 +577,14 @@ async def logout(user: Annotated[UserRow, Depends(get_current_user)]) -> dict[st
     return {"success": True}
 
 
-@router.get("/admin/users", response_model=list[UserPublic])
+@router.get("/admin/users", response_model=list[AdminUserPublic])
 async def admin_list_users(
     _: Annotated[UserRow, Depends(get_current_admin_user)],
     session: Session = Depends(db_session_dep),
-) -> list[UserPublic]:
+) -> list[AdminUserPublic]:
     rows = session.execute(select(UserRow).order_by(UserRow.created_at.desc())).scalars().all()
-    return [_to_public(r) for r in rows]
+    access_keys = session.execute(select(AccessKeyRow)).scalars().all()
+    return [_to_admin_public(r, list(access_keys)) for r in rows]
 
 
 @router.patch("/admin/users/{user_id}", response_model=UserPublic)

@@ -1,0 +1,20 @@
+object_type: MarketRegime
+display_name_zh: 市场状态
+
+attributes:
+  regime_id:
+    type: string
+    primary_key: true
+  as_of:
+    type: datetime
+  vix_level:
+    type: float
+  liquidity_regime:
+    type: enum
+    values: [tight, normal, loose]
+  volatility_regime:
+    type: enum
+    values: [calm, normal, stressed, panic]
+  macro_bias:
+    type: enum
+    values: [risk_on, neutral, risk_off]

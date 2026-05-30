@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from app.api.deps import bearer_subscription_optional
 from app.clients.fmp_client import get_fmp_client
@@ -16,6 +15,7 @@ from app.config import get_settings
 from app.db.session import SessionLocal
 from app.db.models import StockNewsRow
 from app.services.cache_service import TTL_AI, cache_get, cache_set, key_ai_market_summary
+from app.services.llm_router import build_chat_openai, has_llm_provider
 from app.analytics.gex_compute import compute_gex_profile
 from sqlalchemy import select, desc
 
@@ -106,14 +106,13 @@ def _fetch_market_data() -> dict[str, object]:
 def _generate_brief_text(data: dict[str, object]) -> str:
     """Call LLM to synthesize a market brief."""
     cfg = get_settings()
-    api_key = cfg.openrouter_api_key.strip()
-    if not api_key:
-        return "服务端未配置 OPENROUTER_API_KEY，无法生成市场简报。"
+    if not has_llm_provider(cfg):
+        return "服务端未配置 LLM Provider，无法生成市场简报。"
 
-    llm = ChatOpenAI(
-        api_key=api_key,
-        base_url=cfg.openrouter_base_url,
-        model=cfg.model_synthesis,
+    llm = build_chat_openai(
+        cfg,
+        openrouter_model=cfg.model_synthesis,
+        source="agent_brief",
         temperature=0.3,
         timeout=120,
         max_retries=1,

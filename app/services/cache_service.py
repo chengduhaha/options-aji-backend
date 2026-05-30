@@ -37,6 +37,7 @@ def _get_client():
             socket_connect_timeout=3,
             socket_timeout=3,
             retry_on_timeout=True,
+            health_check_interval=30,
         )
         _client.ping()
         logger.info("Redis connected: %s", cfg.redis_url)
