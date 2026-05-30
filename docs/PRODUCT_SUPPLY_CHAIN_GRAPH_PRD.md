@@ -38,8 +38,11 @@
 | `product` 产品/部件 | 产品视角穿透枢纽 | 卫星芯片、碳纤维复材、相控阵天线 |
 
 **公司节点关键属性**：`ticker`（可空，未上市为 null）、`name_zh`/`name_en`、
-`market`（US/TW/KR/HK/CN，需市场标识+国旗）、`sector`、`is_listed`、`logo_url`、`market_cap`、
+`market`（**开放代码表**：US/UK/EU/KR/TW/HK/CN/JP/… 不再固定枚举，因真实供应链跨多市场，
+如 Filtronic=UK、STM=EU，需市场标识+国旗）、`sector`、`is_listed`、`logo_url`、`market_cap`、
 可选实时价/IV（复用现有 stock 数据）。
+
+> 注：SpaceX 已 IPO（ticker `SPCX`），Anthropic / Cursor 为未上市（`is_listed=false`，`ticker=null`）。
 
 ### 1.3 边（关系）类型
 
@@ -50,15 +53,24 @@
 | `invests_in` 投资/持股 | A→B（含 equity_pct） | 金色线 |
 | `parent_of` 母子/控股 | A→B | 粗实线 |
 | `has_segment` 业务分部归属 | 公司→分部 | 树形粗线 |
+| `joint_development` 联合研发/合资 | A↔B | 紫色双线（如 TSLA×SpaceX Terafab） |
 | `partnership` 合作/合资 JV | A↔B | 虚线 |
 | `competitor` 竞争 | A↔B | 红色虚线 |
 | `licenses_to` 技术/专利授权 | A→B | 点划线 |
-| `manufactures_for` 代工 OEM/ODM | A→B | 实线 |
+| `manufactures_for` 代工 OEM/ODM | A→B | 实线（如 INTC 晶圆代工） |
 | `thematic_link` 概念/主题关联 | 无向 | 浅色弱连接 |
 
-**边属性（metadata）**：`direction`(单向/双向)、`weight/strength`(关系强度→线宽)、
-`revenue_share`(营收依赖%)、`equity_pct`(持股%)、`confidence`(可信度)、
-`evidence`+`source_url`+`as_of_date`(证据/来源/时效，保证可溯源、可回放)。
+> **重要**：供应链视角同时包含**上游供应商**与**下游客户**。如 Anthropic 是 SpaceX 的
+> *客户*（每月付 12.5 亿买算力），边方向为 `SpaceX → Anthropic` 的 `supplies_to`，
+> 而非反向。方向由 `direction` + source/target 共同表达。
+
+**边属性（metadata）**：
+- `label`（**供应内容短标签**，边上直接显示，如 "GPU核心算力供应" / "E-band毫米波放大器" / "10年期超合金"）
+- `semantic`（**长描述**，协同链路拆解，沿用现有 ontology relations 的 `semantic` 字段语义）
+- `moat_tier`（**护城河梯队 / 垄断地位**，枚举：`exclusive`独家 / `primary`主供 / `dominant`垄断龙头 / `scarce`全球稀缺 / `normal`普通；**核心筛选维度**，放在边上因同一供应商对不同客户地位不同）
+- `direction`(单向/双向)、`weight/strength`(关系强度→线宽)
+- `revenue_share`(营收依赖%)、`equity_pct`(持股%)、`contract_value`(合同对价，如 Anthropic 12.5亿/月)
+- `confidence`(可信度)、`evidence`+`source_url`+`as_of_date`(证据/来源/时效，可溯源/可回放)
 
 ### 1.4 视角切换（核心交互）
 
@@ -71,9 +83,11 @@
 
 ### 1.5 页面交互清单
 - 顶部：视角 Tab（公司/行业/产品）+ 实体搜索框（autocomplete）
-- 侧栏：关系图例 & 过滤器（每种关系类型独立开关+颜色）
+- 侧栏：关系图例 & 过滤器（三类筛选器：**①按关系类型** 独立开关+颜色、**②按业务分部** segment 分组、**③按护城河梯队** moat_tier）
 - 深度滑块（1–3 跳）
 - 节点卡片：logo + ticker 徽章 + 市场国旗 + 迷你价格 sparkline（复用 recharts）+ 分部配色
+- **护城河可视化**：`exclusive`独家/`dominant`垄断 的供应商加金色光环/徽章，弱关系淡化
+- **边标签**：边上显示 `label`（供应内容），点击展开 `semantic` 长描述
 - 点击节点 → 右侧详情抽屉（公司简介、关键财务、直接邻居列表、跳转 `/stock/{ticker}`）
 - 点击边 → 显示关系证据/来源/时间
 - Minimap + 缩放 + 力导向/层级布局切换
@@ -108,17 +122,20 @@ id            uuid / bigint  PK
 source_id     fk -> graph_nodes.id
 target_id     fk -> graph_nodes.id
 rel_type      enum(supplies_to, mutual_supply, invests_in, parent_of,
-                   has_segment, partnership, competitor, licenses_to,
-                   manufactures_for, thematic_link)
+                   has_segment, joint_development, partnership, competitor,
+                   licenses_to, manufactures_for, thematic_link)
 direction     enum(directed, bidirectional)
+label         text null        -- 供应内容短标签，边上显示，如 "GPU核心算力供应"
+semantic      text null        -- 协同链路长描述
+moat_tier     enum(exclusive, primary, dominant, scarce, normal) null  -- 护城河梯队，核心筛选维度
 weight        float null       -- 关系强度，控制线宽
-attrs         jsonb            -- equity_pct / revenue_share / ...
+attrs         jsonb            -- equity_pct / revenue_share / contract_value / ...
 confidence    enum(confirmed, inferred)
 evidence      text null
 source_url    text null
 as_of_date    date
 created_at, updated_at
-INDEX(source_id), INDEX(target_id), INDEX(rel_type)
+INDEX(source_id), INDEX(target_id), INDEX(rel_type), INDEX(moat_tier)
 ```
 
 **`graph_views`**（已策展全景图，便于一键加载，如"SpaceX 全业务供应链"）
@@ -208,33 +225,48 @@ hover 高亮邻居、淡化无关节点（focus+context）。
 
 ---
 
-## 附录 A：SpaceX 全业务供应链（首个种子图样例）
+## 附录 A：SpaceX 全业务供应链（2026 重组版 · 首个种子图样例）
+
+> 数据源：SpaceX 2026 S-1 招股书（重组合并版）。`as_of_date=2026`。
+> 注意：关系类型已按真实语义区分（非全部 supplies_to），并标注 `label`(供应内容) 与 `moat_tier`(护城河)。
+> 边方向约定：`X ──> Y` 表示 X 供应/作用于 Y。
 
 ```
-SpaceX (SPCX, 核心母体)
- ├─ has_segment → AI 分部 (xAI/Grok/X)
- │    ├─ supplies_to ← NVDA 英伟达 (US)
- │    ├─ supplies_to ← TSLA 特斯拉 (US)
- │    ├─ supplies_to ← INTC 英特尔 (US)
- │    ├─ supplies_to ← Anthropic (未上市)
- │    └─ supplies_to ← Cursor (未上市)
- ├─ has_segment → Connectivity 分部 (Starlink)
- │    ├─ supplies_to ← SATS 回声星 (US)
- │    ├─ supplies_to ← FTC 飞创 (UK)
- │    ├─ supplies_to ← 6285 启碁 (TW)
- │    ├─ supplies_to ← 2313 华通 (TW)
- │    ├─ supplies_to ← 6271 同欣 (TW)
- │    ├─ supplies_to ← STM 意法半导体 (EU)
- │    ├─ supplies_to ← AVGO 博通 (US)
- │    ├─ supplies_to ← TRMB 天宝导航 (US)
- │    └─ supplies_to ← CPSH CPS Tech (US)
- └─ has_segment → Space 分部 (猎鹰/星舰)
-      ├─ supplies_to ← HON 霍尼韦尔 (US)
-      ├─ supplies_to ← 347700 Sphere (KR)
-      ├─ supplies_to ← CRS 卡彭特科技 (US)
-      ├─ supplies_to ← MTRN 迈特瑞恩 (US)
-      ├─ supplies_to ← HXL 赫氏复合材料 (US)
-      ├─ supplies_to ← DCO Ducommun (US)
-      ├─ supplies_to ← ATRO 埃斯特罗 (US)
-      └─ supplies_to ← LHX L3Harris/Aerojet (US)
+SpaceX (SPCX, 核心母体, is_listed=true)
+ │
+ ├─ has_segment → 【AI 分部】(xAI/Grok/X 平台)
+ │    ├─ NVDA  英伟达 (US)      ──supplies_to──>      [GPU核心算力供应] 支撑 Colossus 1 巨型集群  | moat=dominant
+ │    ├─ TSLA  特斯拉 (US)      <─joint_development─>  [Terafab 联合研发] 共建 1TW/年算力超级工厂  | moat=primary
+ │    ├─ INTC  英特尔 (US)      ──manufactures_for──>  [IFS 先进晶圆代工] 2026.04 切入 Terafab    | moat=primary
+ │    ├─ Anthropic (未上市)     SpaceX ──supplies_to──> [算力共享/转售] 每月付 12.5 亿(客户+财务对冲) | 客户向边
+ │    └─ Cursor (未上市)        ──supplies_to──>       [底层代码自动重构] 嵌入 Grok/飞控/星链路由  | moat=primary
+ │
+ ├─ has_segment → 【Connectivity 分部】(Starlink 卫星网络)
+ │    ├─ SATS  回声星 (US)      ──supplies_to──>  [无线电频谱资产] V1 Mobile 手机直连物理钥匙   | moat=exclusive(稀缺资产)
+ │    ├─ FTC   Filtronic (UK)   ──supplies_to──>  [E-band 毫米波高频放大器] V3/V4 星载荷       | moat=exclusive(独家/主供)
+ │    ├─ 6285  启碁科技 (TW)     ──supplies_to──>  [地面用户终端/路由器组装] 全球第一大代工(越南) | moat=dominant
+ │    ├─ 2313  华通电脑 (TW)     ──supplies_to──>  [高密度 HDI PCB] 卫星主板及地面站板卡        | moat=primary
+ │    ├─ 6271  同欣电子 (TW)     ──supplies_to──>  [封装/模组]                                 | moat=normal
+ │    ├─ STM   意法半导体 (EU)   ──manufactures_for──> [相控阵天线 ASIC] 代工 SpaceX 自研射频芯片 | moat=primary
+ │    ├─ AVGO  博通 (US)         ──supplies_to──>  [星载/地面收发通信器件] 核心交换路由芯片      | moat=dominant
+ │    ├─ TRMB  Trimble (US)      ──supplies_to──>  [微秒级高精度授时/定位同步] 星际激光互联时钟  | moat=primary
+ │    └─ CPSH  CPS Tech (US)     ──supplies_to──>  [导热/防辐射屏蔽材料] 航电散热与电磁隔离     | moat=scarce
+ │
+ └─ has_segment → 【Space 分部】(猎鹰/星舰 发射)
+      ├─ HON    霍尼韦尔 (US)     ──supplies_to──>  [飞控/自动制导惯导] 火箭与星舰"中枢大脑"     | moat=dominant
+      ├─ 347700 Sphere (KR)      ──supplies_to──>  [10年期超合金/特种钢] 箭体及猛禽耐高压高温材料 | moat=exclusive(10年长约)
+      ├─ CRS    卡彭特科技 (US)   ──supplies_to──>  [真空感应熔炼特种金属] 猛禽抗烧蚀合金底层冶炼  | moat=primary
+      ├─ MTRN   迈特瑞恩 (US)     ──supplies_to──>  [军工级铍合金/涂层] 全球稀缺铍矿控制者        | moat=exclusive(唯一矿控)
+      ├─ HXL    赫氏复合材料 (US)  ──supplies_to──>  [碳纤维/蜂窝复合材料] 猎鹰/龙飞船轻量化组件    | moat=dominant
+      └─ LHX    L3Harris/Aerojet (US) ──supplies_to──> [动力辅助/流体控制] 姿控小推力器+地面保障  | moat=primary
 ```
+
+> 说明：原始文本树图中 Space 分部曾列出 DCO(Ducommun)、ATRO(埃斯特罗) 两节点，但本轮"协同链路拆解"
+> 正文未给出其具体供应内容/护城河，标记为 `confidence=inferred` 待下轮调研补全证据后再正式入库。
+
+### 关系类型分布（本图验证了多关系类型设计的必要性）
+- `supplies_to` 上游供应：16 条（主体）
+- `manufactures_for` 代工：2 条（INTC、STM）
+- `joint_development` 联合研发：1 条（TSLA Terafab，**双向**）
+- 客户向 `supplies_to`：1 条（Anthropic，方向 SpaceX→Anthropic，证明供应链视角含下游客户）
+- `has_segment` 分部归属：3 条
