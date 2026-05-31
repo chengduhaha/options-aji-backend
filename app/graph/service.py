@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -13,6 +16,7 @@ from app.graph.constants import GRAPH_INGEST_SCHEMA
 from app.services.cache_service import TTL_WARM, cache_delete_pattern, cache_get, cache_set
 
 _validator = Draft202012Validator(GRAPH_INGEST_SCHEMA, format_checker=FormatChecker())
+GRAPH_SNAPSHOT_DIR = Path(os.environ.get("GRAPH_SNAPSHOT_DIR", "data/graph_snapshots"))
 
 
 def validate_graph_payload(payload: dict[str, Any]) -> None:
@@ -182,13 +186,54 @@ def ingest_graph_payload(session: Session, payload: dict[str, Any]) -> dict[str,
     for row in payload.get("views", []):
         _upsert_view(session, row, node_map)
         view_count += 1
-    session.commit()
     cache_delete_pattern("graph:*")
+    session.commit()
+    refresh_graph_snapshots(session)
     return {
         "nodes_upserted": len(payload["nodes"]),
         "edges_upserted": edge_count,
         "views_upserted": view_count,
     }
+
+
+def _snapshot_path(slug: str) -> Path:
+    safe_slug = "".join(char for char in slug.strip() if char.isalnum() or char in {"-", "_"}).strip("-_")
+    return GRAPH_SNAPSHOT_DIR / f"{safe_slug}.json"
+
+
+def write_graph_snapshot(slug: str, graph: dict[str, Any]) -> Path:
+    path = _snapshot_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    graph.setdefault("meta", {})["snapshot"] = "generated"
+    graph["meta"]["snapshotGeneratedAt"] = dt.datetime.now(dt.UTC).isoformat()
+    path.write_text(json.dumps(graph, ensure_ascii=False, default=str), encoding="utf-8")
+    return path
+
+
+def get_graph_snapshot(slug: str) -> dict[str, Any] | None:
+    path = _snapshot_path(slug)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, dict):
+        payload.setdefault("meta", {})["snapshot"] = "hit"
+        return payload
+    return None
+
+
+def refresh_graph_snapshots(session: Session) -> int:
+    views = session.execute(select(GraphViewRow).order_by(GraphViewRow.slug)).scalars().all()
+    generated = 0
+    for view in views:
+        graph = load_graph_view(session, view.slug)
+        if graph is None:
+            continue
+        write_graph_snapshot(view.slug, graph)
+        generated += 1
+    return generated
 
 
 def _serialize_node(node: GraphNodeRow) -> dict[str, Any]:
@@ -520,7 +565,11 @@ def save_graph_view(session: Session, payload: dict[str, Any]) -> dict[str, Any]
         session.flush()
     session.commit()
     cache_delete_pattern("graph:views*")
-    return _serialize_view(view)
+    serialized = _serialize_view(view)
+    graph = load_graph_view(session, serialized["slug"])
+    if graph is not None:
+        write_graph_snapshot(serialized["slug"], graph)
+    return serialized
 
 
 def load_graph_view(session: Session, slug: str) -> dict[str, Any] | None:
@@ -564,3 +613,63 @@ def list_graph_timeline(session: Session, focus: str, depth: int = 2) -> dict[st
         "edges": [],
         "meta": {"focus": focus, "depth": depth, "dates": [date.isoformat() for date in dates if date]},
     }
+
+
+def _bootstrap_cache_key(
+    focus: str,
+    perspective: str,
+    depth: int,
+    rel_types: list[str],
+    moat_tier: str | None,
+    as_of_date: dt.date | None,
+) -> str:
+    rel_key = ",".join(sorted(rel_types)) if rel_types else "*"
+    moat_key = moat_tier or "*"
+    date_key = as_of_date.isoformat() if as_of_date else "*"
+    return f"graph:bootstrap:{focus.upper()}:{perspective}:{depth}:{rel_key}:{moat_key}:{date_key}"
+
+
+def get_graph_bootstrap(
+    session: Session,
+    *,
+    focus: str,
+    perspective: str = "company",
+    depth: int = 2,
+    rel_types: list[str] | str | None = None,
+    moat_tier: str | None = None,
+    as_of_date: str | dt.date | None = None,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    normalized_rel_types = _normalize_list(rel_types)
+    normalized_moat = _clean_str(moat_tier)
+    replay_date = as_of_date if isinstance(as_of_date, dt.date) else _parse_date(as_of_date)
+    safe_depth = max(0, min(int(depth), 4))
+    cache_key = _bootstrap_cache_key(focus, perspective, safe_depth, normalized_rel_types, normalized_moat, replay_date)
+    if use_cache:
+        cached = cache_get(cache_key)
+        if isinstance(cached, dict):
+            cached.setdefault("meta", {})["cache"] = "hit"
+            cached["meta"]["bootstrap"] = True
+            return cached
+
+    graph = get_graph_subgraph(
+        session,
+        focus=focus,
+        perspective=perspective,
+        depth=safe_depth,
+        rel_types=normalized_rel_types,
+        moat_tier=normalized_moat,
+        as_of_date=replay_date,
+    )
+    views = list_graph_views(session).get("meta", {}).get("views", [])
+    timeline = list_graph_timeline(session, focus=focus, depth=safe_depth).get("meta", {}).get("dates", [])
+    graph.setdefault("meta", {}).update(
+        {
+            "bootstrap": True,
+            "views": views,
+            "timelineDates": timeline,
+        }
+    )
+    if use_cache:
+        cache_set(cache_key, graph, ttl=TTL_WARM)
+    return graph

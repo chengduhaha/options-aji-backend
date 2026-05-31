@@ -18,7 +18,14 @@ from app.api.deps_auth import get_current_admin_user
 from app.db.models import Base, GraphEdgeRow, GraphNodeRow, GraphViewRow
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
-from app.graph.service import get_graph_subgraph, ingest_graph_payload, save_graph_view, search_graph
+from app.graph.service import (
+    get_graph_bootstrap,
+    get_graph_snapshot,
+    get_graph_subgraph,
+    ingest_graph_payload,
+    save_graph_view,
+    search_graph,
+)
 
 
 def _session_factory() -> sessionmaker[Session]:
@@ -358,6 +365,95 @@ def test_graph_query_routes_return_uniform_graph_shape() -> None:
     )
     assert saved.status_code == 200
     assert saved.json()["meta"]["view"]["slug"] == "route-saved-view"
+
+
+def test_ingest_generates_curated_view_snapshot_and_snapshot_route(tmp_path: Path, monkeypatch) -> None:
+    from app.api.routes.supply_graph import router
+
+    seed_path = Path(__file__).resolve().parents[1] / "scripts" / "spacex_supply_chain_2026_seed.json"
+    payload = json.loads(seed_path.read_text(encoding="utf-8"))
+    SessionLocal = _session_factory()
+    app = FastAPI()
+
+    monkeypatch.setattr("app.graph.service.GRAPH_SNAPSHOT_DIR", tmp_path)
+
+    def override_db() -> Generator[Session, None, None]:
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    async def override_admin() -> UserRow:
+        return UserRow(email="admin@example.com", password_hash="x", role="admin")
+
+    with SessionLocal() as session:
+        ingest_graph_payload(session, payload)
+        snapshot = get_graph_snapshot("spacex-2026-supply-chain")
+
+    app.dependency_overrides[db_session_dep] = override_db
+    app.dependency_overrides[get_current_admin_user] = override_admin
+    app.include_router(router)
+    client = TestClient(app)
+    route_res = client.get("/api/v1/graph/snapshot/spacex-2026-supply-chain")
+
+    assert (tmp_path / "spacex-2026-supply-chain.json").exists()
+    assert snapshot is not None
+    assert snapshot["meta"]["view"]["slug"] == "spacex-2026-supply-chain"
+    assert len(snapshot["nodes"]) == 26
+    assert route_res.status_code == 200
+    assert route_res.headers["cache-control"] == "s-maxage=300, stale-while-revalidate=600"
+    assert route_res.json()["meta"]["snapshot"] == "hit"
+
+
+def test_graph_bootstrap_returns_graph_views_and_timeline() -> None:
+    seed_path = Path(__file__).resolve().parents[1] / "scripts" / "spacex_supply_chain_2026_seed.json"
+    payload = json.loads(seed_path.read_text(encoding="utf-8"))
+    SessionLocal = _session_factory()
+
+    with SessionLocal() as session:
+        ingest_graph_payload(session, payload)
+        bootstrap = get_graph_bootstrap(session, focus="SPCX", perspective="company", depth=2)
+
+    assert set(bootstrap) == {"nodes", "edges", "meta"}
+    assert len(bootstrap["nodes"]) == 26
+    assert bootstrap["meta"]["views"][0]["slug"] == "spacex-2026-supply-chain"
+    assert "2026-05-30" in bootstrap["meta"]["timelineDates"]
+    assert bootstrap["meta"]["bootstrap"] is True
+
+
+def test_read_graph_routes_send_swr_cache_headers() -> None:
+    from app.api.routes.supply_graph import router
+
+    seed_path = Path(__file__).resolve().parents[1] / "scripts" / "spacex_supply_chain_2026_seed.json"
+    payload = json.loads(seed_path.read_text(encoding="utf-8"))
+    SessionLocal = _session_factory()
+    app = FastAPI()
+
+    def override_db() -> Generator[Session, None, None]:
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    async def override_admin() -> UserRow:
+        return UserRow(email="admin@example.com", password_hash="x", role="admin")
+
+    with SessionLocal() as session:
+        ingest_graph_payload(session, payload)
+
+    app.dependency_overrides[db_session_dep] = override_db
+    app.dependency_overrides[get_current_admin_user] = override_admin
+    app.include_router(router)
+    client = TestClient(app)
+
+    graph_res = client.get("/api/v1/graph", params={"focus": "SPCX", "perspective": "company", "depth": 2})
+    bootstrap_res = client.get("/api/v1/graph/bootstrap", params={"focus": "SPCX", "perspective": "company", "depth": 2})
+
+    assert graph_res.headers["cache-control"] == "s-maxage=300, stale-while-revalidate=600"
+    assert bootstrap_res.headers["cache-control"] == "s-maxage=300, stale-while-revalidate=600"
+    assert bootstrap_res.json()["meta"]["bootstrap"] is True
 
 
 def test_graph_subgraph_uses_cache_key_for_focus_depth_and_filters(monkeypatch) -> None:

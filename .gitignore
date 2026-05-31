@@ -26,6 +26,7 @@ data/*.db
 data/*.db-journal
 data/*.db-shm
 data/*.db-wal
+data/graph_snapshots/*.json
 
 # Local dev: scripts/backend.sh background run
 .backend.pid
