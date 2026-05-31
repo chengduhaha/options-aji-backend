@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.api.deps_auth import get_current_admin_user
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
+from app.api.deps import bearer_subscription_optional
+from app.graph.insight import generate_graph_insight
 from app.graph.service import (
     get_graph_bootstrap,
     get_graph_snapshot,
@@ -150,6 +152,26 @@ def query_graph(
         moat_tier=moat_tier,
         as_of_date=as_of_date,
     )
+
+
+@router.post("/insight")
+def post_graph_insight(
+    payload: dict[str, Any],
+    _: object = Depends(bearer_subscription_optional),
+) -> dict[str, object]:
+    try:
+        result = generate_graph_insight(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_graph_insight_payload", "message": str(exc)},
+        ) from exc
+    if result.get("error") and not result.get("insight"):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "graph_insight_unavailable", "message": str(result.get("error"))},
+        )
+    return {"nodes": [], "edges": [], "meta": result}
 
 
 @router.post("/ingest")
