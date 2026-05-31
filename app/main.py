@@ -46,6 +46,7 @@ from app.api.routes.site_nav import router as site_nav_router
 from app.api.routes.social import router as social_router
 from app.api.routes.stock_detail import router as stock_detail_router
 from app.api.routes.stock_sentiment import router as stock_sentiment_router
+from app.api.routes.supply_graph import router as supply_graph_router
 from app.api.routes.strategy_eval import router as strategy_eval_router
 from app.api.schemas.response import ApiError, ApiFailure
 from app.config import get_settings
@@ -274,6 +275,7 @@ def create_application() -> FastAPI:
     app.include_router(market_dashboard_router)
     app.include_router(stock_detail_router)
     app.include_router(options_router)
+    app.include_router(supply_graph_router)
     app.include_router(profile_router)
     app.include_router(earnings_symbol_router)
     app.include_router(scanner_router)

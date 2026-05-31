@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, BigInteger, Boolean, Date, DateTime, Float, ForeignKey,
-    Index, Integer, Numeric, String, Text, func,
+    CheckConstraint, JSON, BigInteger, Boolean, Date, DateTime, Float, ForeignKey,
+    Index, Integer, Numeric, String, Text, func, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -263,6 +263,131 @@ class SiteNavSettingsRow(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
     updated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+
+# ─── Supply Chain Graph ───────────────────────────────────────────────────────
+
+class GraphNodeRow(Base):
+    """Generic graph node for company / segment / industry / product entities."""
+
+    __tablename__ = "graph_nodes"
+    __table_args__ = (
+        CheckConstraint(
+            "node_type IN ('company', 'segment', 'industry', 'product')",
+            name="ck_graph_nodes_node_type",
+        ),
+        Index("idx_graph_nodes_node_type", "node_type"),
+        Index("idx_graph_nodes_sector", "sector"),
+        Index(
+            "uq_graph_nodes_ticker_market",
+            "ticker",
+            "market",
+            unique=True,
+            sqlite_where=text("ticker IS NOT NULL"),
+            postgresql_where=text("ticker IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    node_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    ticker: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    market: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    name_zh: Mapped[str] = mapped_column(Text, nullable=False)
+    name_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sector: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    is_listed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    logo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attrs: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
+class GraphEdgeRow(Base):
+    """Generic graph edge for supply-chain, investment, segment and thematic links."""
+
+    __tablename__ = "graph_edges"
+    __table_args__ = (
+        CheckConstraint(
+            "rel_type IN ('supplies_to', 'mutual_supply', 'invests_in', 'parent_of', "
+            "'has_segment', 'joint_development', 'partnership', 'competitor', "
+            "'licenses_to', 'manufactures_for', 'thematic_link')",
+            name="ck_graph_edges_rel_type",
+        ),
+        CheckConstraint(
+            "direction IN ('directed', 'bidirectional', 'undirected')",
+            name="ck_graph_edges_direction",
+        ),
+        CheckConstraint(
+            "moat_tier IS NULL OR moat_tier IN ('exclusive', 'primary', 'dominant', 'scarce', 'normal')",
+            name="ck_graph_edges_moat_tier",
+        ),
+        CheckConstraint(
+            "confidence IN ('confirmed', 'inferred')",
+            name="ck_graph_edges_confidence",
+        ),
+        Index("idx_graph_edges_source_id", "source_id"),
+        Index("idx_graph_edges_target_id", "target_id"),
+        Index("idx_graph_edges_rel_type", "rel_type"),
+        Index("idx_graph_edges_moat_tier", "moat_tier"),
+        Index(
+            "uq_graph_edges_identity",
+            "source_id",
+            "target_id",
+            "rel_type",
+            "label",
+            "as_of_date",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    source_id: Mapped[str] = mapped_column(String(36), ForeignKey("graph_nodes.id", ondelete="CASCADE"), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(36), ForeignKey("graph_nodes.id", ondelete="CASCADE"), nullable=False)
+    rel_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False, default="directed")
+    label: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    semantic: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    moat_tier: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    attrs: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="confirmed")
+    evidence: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    as_of_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
+class GraphViewRow(Base):
+    """Curated saved graph views such as SpaceX full-business supply chain."""
+
+    __tablename__ = "graph_views"
+    __table_args__ = (
+        Index("idx_graph_views_slug", "slug", unique=True),
+        Index("idx_graph_views_perspective", "perspective"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    slug: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    perspective: Mapped[str] = mapped_column(String(32), nullable=False)
+    focus_node_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("graph_nodes.id", ondelete="SET NULL"), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
 
 
 # ─── Historical Bars (time-series) ───────────────────────────────────────────
