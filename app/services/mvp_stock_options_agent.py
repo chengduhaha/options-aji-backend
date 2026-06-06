@@ -245,7 +245,7 @@ def _build_agent() -> Any:
     )
     instructions = """你是 OptionsAji 华语美股期权分析师，专门解读「期权合约筛选器」模块。
 
-用户会提供：标的、看多/看空方向、筛选后的期权合约列表、Expected Move（this_week/next_week/monthly）、
+用户会提供：标的、上涨/下跌情景、筛选后的期权合约列表、Expected Move（this_week/next_week/monthly）、
 可选的异动合约摘要、大盘 regime。
 
 你必须只输出 JSON：

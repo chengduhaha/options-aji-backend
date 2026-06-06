@@ -1,4 +1,4 @@
-"""推荐类 Copilot tools."""
+"""情景对照类 Copilot tools."""
 from __future__ import annotations
 
 from langchain_core.tools import tool
@@ -11,7 +11,7 @@ async def recommend_options_strike(
     underlying_price: float,
     confidence: float = 0.5,
 ) -> dict:
-    """根据方向和置信度推荐行权价和 DTE."""
+    """根据方向和置信度参考行权价和 DTE."""
     if not ticker.strip():
         return {"error": "ticker is required"}
     if direction not in {"bullish", "bearish"}:
@@ -36,8 +36,8 @@ async def recommend_options_strike(
         "recommended_strike": recommended_strike,
         "days_to_expiry": dte,
         "rationale_zh": (
-            f"基于 {direction} 信号(置信度 {confidence:.0%}),"
-            f" 推荐 {dte} 天到期的 {recommended_strike} {option_type}"
+            f"基于 {direction} 情景(置信度 {confidence:.0%}),"
+            f" 参考 {dte} 天到期的 {recommended_strike} {option_type}"
         ),
     }
 
