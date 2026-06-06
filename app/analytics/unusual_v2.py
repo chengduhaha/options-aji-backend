@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+from types import SimpleNamespace
 from typing import Any, Iterable, Optional
 
 from app.analytics.options_chain_analysis import (
@@ -162,6 +163,59 @@ def score_row(
         "estimatedFlowUsd": round(flow, 2),
     }
     return score, reasons, telem
+
+
+def _parse_expiration(value: object) -> dt.date | None:
+    if value is None:
+        return None
+    if isinstance(value, dt.date):
+        return value
+    raw = str(value).strip()[:10]
+    try:
+        return dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def snapshot_rows_from_futu_contracts(
+    contracts: list[dict[str, Any]],
+) -> list[SimpleNamespace]:
+    """Adapt Futu option contract dicts for score_snapshot_rows."""
+    rows: list[SimpleNamespace] = []
+    for rec in contracts:
+        if not isinstance(rec, dict):
+            continue
+        exp = _parse_expiration(rec.get("expiration_date"))
+        if exp is None:
+            continue
+        side = str(rec.get("contract_type") or "").lower()
+        if side.startswith("c"):
+            ctype = "call"
+        elif side.startswith("p"):
+            ctype = "put"
+        else:
+            continue
+        rows.append(
+            SimpleNamespace(
+                underlying_ticker=str(rec.get("underlying") or "").upper(),
+                expiration_date=exp,
+                strike_price=rec.get("strike_price"),
+                contract_type=ctype,
+                open_interest=rec.get("open_interest"),
+                day_volume=rec.get("day_volume"),
+                implied_volatility=rec.get("implied_volatility"),
+                delta=rec.get("delta"),
+                bid=rec.get("bid"),
+                ask=rec.get("ask"),
+                midpoint=rec.get("midpoint"),
+                ticker=rec.get("ticker"),
+                snapshot_time=rec.get("snapshot_time"),
+                last_trade_at=rec.get("last_trade_at"),
+                last_trade_price=rec.get("last_trade_price"),
+                last_trade_size=rec.get("last_trade_size"),
+            )
+        )
+    return rows
 
 
 def score_snapshot_rows(

@@ -8,11 +8,19 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps_access_key import AccessKeyGrant, require_access_key
+from app.api.deps_access_key import MvpEntitlement, resolve_mvp_entitlement
+from app.services.mvp_entitlement import (
+    mvp_envelope,
+    redact_macro_calendar,
+    redact_market_insights,
+    redact_playbook_hints,
+    redact_stock_insights,
+    redact_war_room,
+)
 from app.config import get_settings
 from app.api.routes.macro import get_macro_calendar
 from app.db.models import TreasuryRateRow
@@ -638,22 +646,24 @@ def _call_war_room_llm(events: list[dict[str, Any]], treasury: dict[str, Any], h
     return None
 
 
-@router.get("/market-insights", response_model=MvpMarketInsightsPayload)
+@router.get("/market-insights")
 async def mvp_market_insights(
-    _: AccessKeyGrant = Depends(require_access_key),
-) -> MvpMarketInsightsPayload:
+    entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
+) -> dict[str, Any]:
     """DeepAgents 深度推理：市场状态、VIX 曲线、VIX/P/C、国债曲线解读。"""
     try:
         context = build_mvp_market_context()
-        return await generate_mvp_market_insights(context)
+        payload = await generate_mvp_market_insights(context)
     except Exception as exc:
         logger.exception("MVP market-insights failed: %s", exc)
         from app.services.mvp_market_agent import _rule_based_insights
 
         try:
-            return _rule_based_insights(build_mvp_market_context())
+            payload = _rule_based_insights(build_mvp_market_context())
         except Exception:
-            return _rule_based_insights({})
+            payload = _rule_based_insights({})
+    body = redact_market_insights(payload.model_dump(), entitlement.tier)
+    return mvp_envelope(entitlement.tier, body)
 
 
 @router.get("/macro-calendar-insights")
@@ -662,7 +672,7 @@ def mvp_macro_calendar_insights(
     from_date: str = Query(""),
     to_date: str = Query(""),
     country: str = Query("US"),
-    _: AccessKeyGrant = Depends(require_access_key),
+    entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
     """AI/rule interpretation for economic calendar events in Chinese."""
     today = datetime.now(timezone.utc).date().isoformat()
@@ -683,48 +693,59 @@ def mvp_macro_calendar_insights(
     if ai is None and events and _should_schedule_llm(macro_cache_key):
         background_tasks.add_task(_call_macro_calendar_llm, events, fallback, from_date, to_date, country)
     result = ai or fallback
-    return {
+    merged = {
         "from": from_date,
         "to": to_date,
         "country": country,
         **result,
     }
+    body = redact_macro_calendar(merged, entitlement.tier)
+    return mvp_envelope(entitlement.tier, body)
 
 
 @router.get("/playbook-hints")
 def mvp_playbook_hints(
     topic: str = Query(default="screener"),
-    _: AccessKeyGrant = Depends(require_access_key),
+    entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, object]:
     """Short playbook bullets for MVP UI (no full HTML)."""
     from app.services.options_playbook import get_playbook_hints
 
     hint = get_playbook_hints(topic)
-    return {"topic": hint.topic, "bullets": list(hint.bullets)}
+    body = redact_playbook_hints({"topic": hint.topic, "bullets": list(hint.bullets)}, entitlement.tier)
+    return mvp_envelope(entitlement.tier, body)
 
 
-@router.post("/stock-options-insights", response_model=StockOptionsInsightsPayload)
+@router.post("/stock-options-insights")
 async def mvp_stock_options_insights(
     body: StockOptionsInsightRequest,
-    _: AccessKeyGrant = Depends(require_access_key),
-) -> StockOptionsInsightsPayload:
+    entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
+) -> dict[str, Any]:
     """阿吉深度洞察：期权合约筛选器 + Expected Move + 与异动/大盘对照。"""
+    if entitlement.tier == "guest":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "login_required", "message": "请先注册并登录后查看标的深度分析。"},
+        )
     try:
         cached = get_cached_stock_options_insights(body)
         if cached:
-            return cached
-        if has_llm_provider():
-            warm_key = f"mvp:stock-options-insights:warm:{body.symbol.upper()}:{body.direction}"
-            if _should_schedule_llm(warm_key, cooldown_seconds=60):
-                loop = asyncio.get_running_loop()
-                task = loop.run_in_executor(None, _warm_stock_options_insights_blocking, body)
-                task.add_done_callback(_log_future_exception)
-        return generate_fast_stock_options_insights(body)
+            payload = cached
+        else:
+            if entitlement.tier == "pro" and has_llm_provider():
+                warm_key = f"mvp:stock-options-insights:warm:{body.symbol.upper()}:{body.direction}"
+                if _should_schedule_llm(warm_key, cooldown_seconds=60):
+                    loop = asyncio.get_running_loop()
+                    task = loop.run_in_executor(None, _warm_stock_options_insights_blocking, body)
+                    task.add_done_callback(_log_future_exception)
+            payload = generate_fast_stock_options_insights(body)
     except Exception as exc:
         logger.exception("MVP stock-options-insights failed: %s", exc)
         from app.services.mvp_stock_options_agent import _rule_based_insights
 
-        return _rule_based_insights(body)
+        payload = _rule_based_insights(body)
+    redacted = redact_stock_insights(payload.model_dump(), entitlement.tier)
+    return mvp_envelope(entitlement.tier, redacted)
 
 
 @router.get("/war-room")
@@ -732,7 +753,7 @@ def mvp_war_room(
     background_tasks: BackgroundTasks,
     hours: int = Query(default=6, ge=1, le=24),
     session: Session = Depends(db_session_dep),
-    _: AccessKeyGrant = Depends(require_access_key),
+    entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
     try:
         rows = list_discord_feed_rows(session, ticker=None, hours=hours, limit=100)
@@ -769,7 +790,7 @@ def mvp_war_room(
             trade_plan = [str(x) for x in ai_plan if str(x).strip()][:6]
         summary = str(ai.get("summary_zh") or "").strip()
 
-    return {
+    raw = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source": "discord+treasury+llm" if ai else "discord+treasury+rules",
         "window_hours": hours,
@@ -782,3 +803,5 @@ def mvp_war_room(
             "ai_enabled": bool(ai),
         },
     }
+    body = redact_war_room(raw, entitlement.tier)
+    return mvp_envelope(entitlement.tier, body)

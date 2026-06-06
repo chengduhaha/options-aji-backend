@@ -674,3 +674,16 @@ GET /stable/income-statement-growth-bulk           批量利润增长
 GET /stable/cash-flow-statement-growth-bulk        批量现金流增长
 GET /stable/eod-bulk                               批量 EOD 价格
 ```
+
+---
+
+## OptionsAji 个股深度（`/api/stock/{symbol}`）数据源矩阵
+
+| Tab | API | 主数据源（`futu_enabled=true`） | 缓存 / 同步 |
+|-----|-----|--------------------------------|-------------|
+| 概览 | `GET .../overview` | Futu 报价 + 日 K + 期权链快照 | Redis 15min |
+| 波动率 | `GET .../volatility` | Futu K 线 + 期权链 IV term/skew | 按需 |
+| 异动 | `GET .../unusual-v2` | PG `options_snapshots`；无数据时 Futu 按需 | 调度器 15min + `futu_background_options_sync_enabled` |
+| GEX | `GET .../gex` | Futu 链 + 本地 BSM；或 `gex_backend_url` | Redis / 可选上游 |
+
+已移除 Tab：期权链、策略、财报（个股内）。全局财报日历仍用 FMP → `/api/earnings/calendar-view`。

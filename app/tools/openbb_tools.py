@@ -87,13 +87,15 @@ class OpenBBToolkit:
             return {"error": "empty_symbol"}
 
         settings = get_settings()
-        if getattr(settings, "futu_enabled", False):
+        futu_on = getattr(settings, "futu_enabled", False)
+        if futu_on:
             try:
                 row = get_futu_client().get_stock_quote(guard)
                 if isinstance(row, dict) and not row.get("error"):
                     return row
             except Exception as exc:
                 logger.warning("get_quote Futu(%s): %s", guard, exc)
+            return {"symbol": guard, "error": "futu_quote_failed"}
 
         if settings.fmp_api_key.strip():
             try:
@@ -167,29 +169,34 @@ class OpenBBToolkit:
         iv_rank = 35
         pcr = 0.85
 
+        settings = get_settings()
         try:
-            ticker = yf_ticker(guard)
-            opts_list = list(ticker.options or [])
-            expiry = opts_list[0] if opts_list else None
-
-            if expiry is not None and price > 0:
-                oc = ticker.option_chain(expiry)
-                calls_df = oc.calls
-                puts_df = oc.puts
-                if not calls_df.empty and "strike" in calls_df.columns:
-                    row_idx = (calls_df["strike"].astype(float) - price).abs().idxmin()
-                    atm_row = calls_df.loc[row_idx]
-                    iv_raw = atm_row.get("impliedVolatility")
-                    if iv_raw is not None:
-                        iv_f = float(iv_raw)
-                        if not math.isnan(iv_f) and iv_f > 0:
-                            atm_iv = iv_f * 100.0
-                cv = calls_df["volume"].fillna(0).astype(float).sum() if not calls_df.empty else 0.0
-                pv = puts_df["volume"].fillna(0).astype(float).sum() if not puts_df.empty else 0.0
-                if cv > 0 and pv >= 0:
-                    pcr = float(pv / cv)
-                elif pv > 0 and cv <= 0:
-                    pcr = 9.99
+            if getattr(settings, "futu_enabled", False):
+                payload = get_futu_client().get_option_chain_snapshot(guard, limit=2000)
+                contracts = list(payload.get("contracts") or []) if isinstance(payload, dict) else []
+                atm_iv, pcr = _atm_iv_pcr_from_futu_contracts(contracts, price)
+            else:
+                ticker = yf_ticker(guard)
+                opts_list = list(ticker.options or [])
+                expiry = opts_list[0] if opts_list else None
+                if expiry is not None and price > 0:
+                    oc = ticker.option_chain(expiry)
+                    calls_df = oc.calls
+                    puts_df = oc.puts
+                    if not calls_df.empty and "strike" in calls_df.columns:
+                        row_idx = (calls_df["strike"].astype(float) - price).abs().idxmin()
+                        atm_row = calls_df.loc[row_idx]
+                        iv_raw = atm_row.get("impliedVolatility")
+                        if iv_raw is not None:
+                            iv_f = float(iv_raw)
+                            if not math.isnan(iv_f) and iv_f > 0:
+                                atm_iv = iv_f * 100.0
+                    cv = calls_df["volume"].fillna(0).astype(float).sum() if not calls_df.empty else 0.0
+                    pv = puts_df["volume"].fillna(0).astype(float).sum() if not puts_df.empty else 0.0
+                    if cv > 0 and pv >= 0:
+                        pcr = float(pv / cv)
+                    elif pv > 0 and cv <= 0:
+                        pcr = 9.99
         except Exception as exc:
             logger.warning("frontend_market_bar extras(%s): %s", guard, exc)
 
@@ -324,6 +331,8 @@ class OpenBBToolkit:
                     )
             except Exception as exc:
                 logger.warning("get_option_chain_full Futu(%s): %s", guard, exc)
+            if getattr(settings, "futu_enabled", False):
+                return {"symbol": guard, "error": "futu_chain_failed"}
 
         try:
             ticker = yf_ticker(guard)
@@ -449,6 +458,59 @@ class OpenBBToolkit:
 
 def build_default_toolkit() -> OpenBBToolkit:
     return OpenBBToolkit()
+
+
+def _atm_iv_pcr_from_futu_contracts(
+    contracts: list[dict[str, object]],
+    spot: float,
+) -> tuple[float, float]:
+    """Nearest-expiry ATM IV (percent) and put/call volume ratio from Futu contracts."""
+    atm_iv = 18.5
+    pcr = 0.85
+    if spot <= 0 or not contracts:
+        return atm_iv, pcr
+
+    by_exp: dict[str, list[dict[str, object]]] = {}
+    for rec in contracts:
+        if not isinstance(rec, dict):
+            continue
+        exp = str(rec.get("expiration_date") or "")[:10]
+        if exp:
+            by_exp.setdefault(exp, []).append(rec)
+    if not by_exp:
+        return atm_iv, pcr
+
+    nearest = sorted(by_exp.keys())[0]
+    slice_rows = by_exp[nearest]
+    call_vol = put_vol = 0.0
+    best_iv: Optional[float] = None
+    best_dist = float("inf")
+    for rec in slice_rows:
+        side = str(rec.get("contract_type") or "").lower()
+        vol = float(rec.get("day_volume") or 0)
+        if side == "call":
+            call_vol += vol
+        elif side == "put":
+            put_vol += vol
+        strike = rec.get("strike_price")
+        iv = rec.get("implied_volatility")
+        if not isinstance(strike, (int, float)) or not isinstance(iv, (int, float)):
+            continue
+        iv_f = float(iv)
+        if iv_f <= 0:
+            continue
+        iv_pct = iv_f * 100.0 if iv_f <= 2.5 else iv_f
+        dist = abs(float(strike) - spot)
+        if dist < best_dist:
+            best_dist = dist
+            best_iv = iv_pct
+    if best_iv is not None:
+        atm_iv = best_iv
+    if call_vol > 0:
+        pcr = put_vol / call_vol
+    elif put_vol > 0:
+        pcr = 9.99
+    return atm_iv, pcr
 
 
 def _scalar_int(value: object) -> Optional[int]:

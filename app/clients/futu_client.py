@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
+import pandas as pd
+
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -190,6 +192,50 @@ class FutuQuoteClient:
             "eps": _safe_float(row.get("earning_per_share")),
             "timestamp": _clean_value(row.get("update_time")) or datetime.now(timezone.utc).isoformat(),
         }
+
+    def get_daily_klines(self, symbol: str, *, count: int = 260) -> pd.DataFrame | None:
+        """Daily OHLCV history (yfinance-compatible column names) for HV / price charts."""
+        if not self.enabled:
+            return None
+        futu_code = normalize_futu_us_code(symbol)
+        context = self._new_context()
+        try:
+            from futu import AuType, KLType, RET_OK
+
+            ret, data, _page = context.request_history_kline(
+                futu_code,
+                start=None,
+                end=None,
+                max_count=max(count, 30),
+                ktype=KLType.K_DAY,
+                autype=AuType.QFQ,
+            )
+            if ret != RET_OK or data is None or getattr(data, "empty", True):
+                logger.warning("Futu kline empty %s ret=%s", symbol, ret)
+                return None
+            frame = data.copy()
+            rename = {
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+            }
+            for src, dst in rename.items():
+                if src in frame.columns and dst not in frame.columns:
+                    frame[dst] = frame[src]
+            if "time_key" in frame.columns:
+                frame.index = pd.to_datetime(frame["time_key"])
+            elif "code" in frame.columns and len(frame) > 0:
+                frame.index = pd.RangeIndex(len(frame))
+            return frame
+        except Exception as exc:
+            logger.warning("Futu daily klines failed %s: %s", symbol, exc)
+            return None
+        finally:
+            close = getattr(context, "close", None)
+            if callable(close):
+                close()
 
     def get_stock_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         if not self.enabled:

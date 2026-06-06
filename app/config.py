@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     auth_verification_max_attempts: int = 5
     auth_verification_debug_expose_code: bool = False
 
+    # ── MVP tiered access (guest / trial / pro) ───────────────────────────────
+    mvp_trial_enabled: bool = True
+
     # ── Email (registration verification) ─────────────────────────────────────
     # smtp | resend | console (console = log only, for local dev)
     email_provider: str = "smtp"

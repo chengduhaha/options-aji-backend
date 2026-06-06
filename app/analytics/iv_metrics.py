@@ -9,6 +9,8 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
+from app.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,6 +85,20 @@ def hv_series_and_current(symbol: str) -> tuple[list[tuple[str, float]], dict[st
     if not guard:
         return [], {"error": "empty_symbol"}
 
+    cfg = get_settings()
+    if getattr(cfg, "futu_enabled", False):
+        try:
+            from app.clients.futu_client import get_futu_client
+
+            hist = get_futu_client().get_daily_klines(guard, count=280)
+            if hist is not None and not hist.empty:
+                series, meta = hv_series_and_meta_from_hist(hist, guard)
+                meta["historySource"] = "futu"
+                return series, meta
+        except Exception as exc:
+            logger.warning("hv_series futu(%s): %s", guard, exc)
+            return [], {"symbol": guard, "error": "futu_history_failed"}
+
     try:
         t = yf.Ticker(guard)
         hist = t.history(period="1y", interval="1d", auto_adjust=True)
@@ -90,7 +106,9 @@ def hv_series_and_current(symbol: str) -> tuple[list[tuple[str, float]], dict[st
         logger.warning("hv_series(%s): %s", guard, exc)
         return [], {"symbol": guard, "error": "history_failed"}
 
-    return hv_series_and_meta_from_hist(hist, guard)
+    series, meta = hv_series_and_meta_from_hist(hist, guard)
+    meta["historySource"] = "yfinance"
+    return series, meta
 
 
 def iv_rank_percentile_proxy(

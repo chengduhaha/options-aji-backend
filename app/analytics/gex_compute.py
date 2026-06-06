@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.clients.fmp_client import get_fmp_client
+from app.clients.futu_client import get_futu_client
 from app.config import get_settings
 from app.tools.yf_helpers import yf_ticker
 
@@ -101,6 +102,28 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
     guard = symbol.strip().upper()
     if not guard:
         return {"symbol": "", "error": "empty_symbol"}
+
+    cfg = get_settings()
+    if getattr(cfg, "futu_enabled", False):
+        try:
+            futu = get_futu_client()
+            quote = futu.get_stock_quote(guard)
+            spot_raw = quote.get("last_price") if isinstance(quote, dict) else None
+            if isinstance(spot_raw, (int, float)) and float(spot_raw) > 0:
+                chain = futu.get_option_chain_snapshot(guard, limit=2000)
+                contracts = chain.get("contracts") if isinstance(chain, dict) else None
+                if isinstance(contracts, list) and contracts:
+                    out = compute_gex_profile_from_contracts(
+                        guard,
+                        contracts=contracts,
+                        spot=float(spot_raw),
+                    )
+                    if not out.get("error"):
+                        out["spotSource"] = "futu_quote"
+                        return out
+        except Exception as exc:
+            logger.warning("compute_gex_profile futu(%s): %s", guard, exc)
+        return {"symbol": guard, "error": "futu_gex_failed"}
 
     try:
         t = yf_ticker(guard)

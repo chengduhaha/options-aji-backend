@@ -16,12 +16,14 @@ massive_ws_url = "wss://delayed.massive.com/options"
 fmp_api_key = ""
 fmp_base_url = "https://financialmodelingprep.com/stable"
 
-futu_enabled = false
+futu_enabled = true
 futu_host = "127.0.0.1"
 futu_port = 11111
 futu_snapshot_batch_size = 200
 futu_cache_ttl_seconds = 3
 futu_connect_timeout_seconds = 0.3
+# 盘时每 15 分钟将 Futu 期权链写入 options_snapshots（异动 v2）；需 futu-opend 已登录
+futu_background_options_sync_enabled = true
 
 openrouter_api_key = ""
 openrouter_base_url = "https://openrouter.ai/api/v1"
