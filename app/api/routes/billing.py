@@ -79,6 +79,24 @@ def _apply_subscription_to_customer(
     for row in rows:
         row.plan = plan
         row.current_period_end = period_end
+        row.provider = row.provider or "stripe"
+        row.provider_customer_id = row.provider_customer_id or customer_id
+        row.provider_subscription_id = str(sub.get("id") or row.provider_subscription_id or "")
+        row.provider_status = st or row.provider_status
+        price_id = None
+        items = sub.get("items")
+        if isinstance(items, dict):
+            data = items.get("data")
+            if isinstance(data, list) and data:
+                price = data[0].get("price") if isinstance(data[0], dict) else None
+                if isinstance(price, dict):
+                    price_id = price.get("id")
+        row.provider_price_id = str(price_id or row.provider_price_id or "") or None
+        row.cancel_at_period_end = bool(sub.get("cancel_at_period_end") or False)
+        if st == "past_due" and row.past_due_since is None:
+            row.past_due_since = dt.datetime.now(dt.timezone.utc)
+        if st in ("active", "trialing", "canceled", "incomplete_expired"):
+            row.past_due_since = None
         session.merge(row)
     session.commit()
     logger.info("Stripe subscription sync customer=%s plan=%s", customer_id, plan)
@@ -96,6 +114,13 @@ def create_checkout_session(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "stripe_not_configured", "message": "服务端未配置 Stripe。"},
         )
+    success_url = cfg.stripe_success_url.strip()
+    cancel_url = cfg.stripe_cancel_url.strip()
+    if not success_url or not cancel_url:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "stripe_url_not_configured", "message": "服务端未配置 Stripe 成功/取消跳转地址。"},
+        )
 
     stripe = _stripe_module()
     stripe.api_key = key
@@ -104,8 +129,8 @@ def create_checkout_session(
         sess = stripe.checkout.Session.create(
             mode="subscription",
             line_items=[{"price": price, "quantity": 1}],
-            success_url=cfg.stripe_success_url.strip() or "https://example.com/settings?billing=success",
-            cancel_url=cfg.stripe_cancel_url.strip() or "https://example.com/settings?billing=cancel",
+            success_url=success_url,
+            cancel_url=cancel_url,
             client_reference_id=body.api_key[:200],
             metadata={"api_key": body.api_key[:200]},
         )
@@ -255,11 +280,15 @@ async def stripe_webhook(
                     row = ApiEntitlementRow(
                         api_key=str(api_key),
                         stripe_customer_id=str(customer),
+                        provider="stripe",
+                        provider_customer_id=str(customer),
                         plan="free",
                     )
                     session.add(row)
                 else:
                     row.stripe_customer_id = str(customer)
+                    row.provider = row.provider or "stripe"
+                    row.provider_customer_id = row.provider_customer_id or str(customer)
                     session.merge(row)
                 logger.info("Checkout completed api_key prefix=%s", str(api_key)[:8])
 

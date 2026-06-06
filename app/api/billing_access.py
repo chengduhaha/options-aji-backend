@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db.models import ApiEntitlementRow, UsageDailyRow
+from app.db.models_user import UserRow
 from app.db.session import db_session_dep
+from app.services.entitlements import CommercialTier, resolve_commercial_entitlement
+from app.services.jwt_tokens import decode_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,19 @@ def _increment_agent_usage(session: Session, api_key: str, day: str) -> None:
     session.commit()
 
 
+def _user_from_bearer_token(session: Session, token: str) -> UserRow | None:
+    payload = decode_access_token(token)
+    if not isinstance(payload, dict):
+        return None
+    sub = payload.get("sub")
+    if not isinstance(sub, str) or not sub.strip():
+        return None
+    row = session.get(UserRow, sub)
+    if row is None or row.role == "disabled":
+        return None
+    return row
+
+
 def ensure_agent_billing(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
     session: Session = Depends(db_session_dep),
@@ -81,7 +97,8 @@ def ensure_agent_billing(
     settings = get_settings()
     token = extract_bearer_token(authorization)
     stripe_on = bool(settings.stripe_secret_key.strip())
-    need_auth = settings.subscription_required or stripe_on
+    creem_on = bool(settings.creem_api_key.strip() and settings.creem_product_id_pro.strip())
+    need_auth = settings.subscription_required or stripe_on or creem_on
 
     if not need_auth:
         return token
@@ -89,11 +106,33 @@ def ensure_agent_billing(
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "unauthorized", "message": "需要 Authorization: Bearer API 密钥。"},
+            detail={"code": "unauthorized", "message": "需要 Authorization: Bearer JWT 或 API 密钥。"},
         )
 
     if token in _legacy_tokens(settings):
         return token
+
+    user = _user_from_bearer_token(session, token)
+    if user is not None:
+        entitlement = resolve_commercial_entitlement(session, user=user)
+        if entitlement.tier in (CommercialTier.ADMIN, CommercialTier.PRO):
+            return f"user:{user.id}"
+
+        usage_key = f"user:{user.id}"
+        limit = max(0, int(settings.free_tier_daily_agent_queries))
+        day = _utc_day_iso()
+        used = _usage_today(session, usage_key, day)
+        if used >= limit:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail={
+                    "code": "quota_exceeded",
+                    "message": f"今日 AI 请求已达 Free 上限（{limit} 次）。请升级 Pro 或明日再试。",
+                },
+            )
+        _increment_agent_usage(session, usage_key, day)
+        logger.debug("Agent usage increment user=%s day=%s -> %s", user.id, day, used + 1)
+        return usage_key
 
     if not stripe_on:
         raise HTTPException(

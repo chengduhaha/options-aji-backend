@@ -22,6 +22,7 @@ from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
 from app.api.routes.congress import router as congress_router
 from app.api.routes.copilot_routes import router as copilot_router
+from app.api.routes.creem_billing import router as creem_billing_router
 from app.api.routes.cross_market_core import router as cross_market_core_router
 from app.api.routes.cross_market_diagnostics import router as cross_market_diag_router
 from app.api.routes.dark_pool import router as dark_pool_router
@@ -258,6 +259,7 @@ def create_application() -> FastAPI:
     app.include_router(admin_usage_router)
     app.include_router(site_nav_router)
     app.include_router(billing_router)
+    app.include_router(creem_billing_router)
     app.include_router(agent_router)
     app.include_router(copilot_router)
     app.include_router(ibkr_router)

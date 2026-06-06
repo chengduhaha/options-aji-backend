@@ -44,6 +44,24 @@ sync_enabled = true
 
 cors_origins = "https://options-aji.vercel.app,http://localhost:3000"
 
+# ── Stripe billing（兼容/备用） ─────────────────────────────────────────────
+stripe_secret_key = ""
+stripe_webhook_secret = ""
+stripe_price_id_pro = ""
+stripe_success_url = "http://localhost:3000/settings?billing=success"
+stripe_cancel_url = "http://localhost:3000/settings?billing=cancel"
+stripe_portal_return_url = "http://localhost:3000/settings?billing=portal"
+free_tier_daily_agent_queries = 20
+
+# ── Creem billing（主商业付费入口） ─────────────────────────────────────────
+creem_api_key = ""
+creem_api_base_url = "https://api.creem.io"
+creem_product_id_pro = ""
+creem_success_url = "http://localhost:3000/settings?billing=creem-success"
+creem_cancel_url = "http://localhost:3000/settings?billing=creem-cancel"
+creem_portal_url = ""
+creem_webhook_secret = ""
+
 # ── JWT 用户登录（建议用环境变量 JWT_SECRET_KEY，勿提交真实密钥） ──
 # jwt_secret_key = ""
 # jwt_expire_hours = 24

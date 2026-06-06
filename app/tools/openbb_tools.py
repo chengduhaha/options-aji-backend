@@ -95,7 +95,7 @@ class OpenBBToolkit:
                     return row
             except Exception as exc:
                 logger.warning("get_quote Futu(%s): %s", guard, exc)
-            return {"symbol": guard, "error": "futu_quote_failed"}
+            logger.warning("get_quote Futu(%s) unavailable, falling back to FMP/yfinance", guard)
 
         if settings.fmp_api_key.strip():
             try:

@@ -62,15 +62,43 @@ class StripeWebhookEventRow(Base):
     )
 
 
+class PaymentWebhookEventRow(Base):
+    __tablename__ = "payment_webhook_events"
+    __table_args__ = (Index("idx_payment_webhook_provider_received", "provider", "received_at"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    received_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+
+
 class ApiEntitlementRow(Base):
     __tablename__ = "api_entitlements"
-    __table_args__ = (Index("idx_api_entitlements_customer", "stripe_customer_id"),)
+    __table_args__ = (
+        Index("idx_api_entitlements_customer", "stripe_customer_id"),
+        Index("idx_api_entitlements_user_provider", "user_id", "provider"),
+        Index("idx_api_entitlements_provider_customer", "provider", "provider_customer_id"),
+        Index("idx_api_entitlements_provider_subscription", "provider", "provider_subscription_id"),
+    )
 
     api_key: Mapped[str] = mapped_column(String(256), primary_key=True)
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     plan: Mapped[str] = mapped_column(String(32), nullable=False, default="free")
     current_period_end: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    provider_customer_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    provider_subscription_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    provider_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    provider_price_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    past_due_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
 
 

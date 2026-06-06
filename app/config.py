@@ -130,6 +130,15 @@ class Settings(BaseSettings):
     stripe_portal_return_url: str = "http://localhost:3000/settings?billing=portal"
     free_tier_daily_agent_queries: int = 20
 
+    # ── Creem billing (primary commercial checkout) ───────────────────────────
+    creem_api_key: str = ""
+    creem_api_base_url: str = "https://api.creem.io"
+    creem_product_id_pro: str = ""
+    creem_success_url: str = "http://localhost:3000/settings?billing=creem-success"
+    creem_cancel_url: str = "http://localhost:3000/settings?billing=creem-cancel"
+    creem_portal_url: str = ""
+    creem_webhook_secret: str = ""
+
     # ── JWT user auth ───────────────────────────────────────────────────────────
     jwt_secret_key: str = ""
     jwt_expire_hours: int = 24

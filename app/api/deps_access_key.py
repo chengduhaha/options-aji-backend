@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal, Optional
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header
 from sqlalchemy.orm import Session
 
 from app.api.deps_auth import extract_bearer_user_token
-from app.config import get_settings
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
-from app.services.access_keys import AccessKeyGrant, inspect_access_key, validate_access_key
+from app.services.access_keys import AccessKeyGrant, validate_access_key
+from app.services.entitlements import CommercialTier, resolve_commercial_entitlement
 from app.services.jwt_tokens import decode_access_token
 
 MvpTier = Literal["guest", "trial", "pro"]
@@ -52,39 +52,6 @@ def _admin_grant() -> AccessKeyGrant:
     )
 
 
-def _try_access_key_grant(
-    session: Session,
-    *,
-    raw_key: str,
-    device_id: str,
-    user: UserRow | None,
-    email: str | None,
-) -> AccessKeyGrant | None:
-    key = raw_key.strip()
-    dev = device_id.strip()
-    if not key or not dev:
-        return None
-    try:
-        status = inspect_access_key(
-            session,
-            raw_key=key,
-            device_id=dev,
-            user=user,
-            email=email,
-            commit_usage=True,
-        )
-    except HTTPException:
-        return None
-    if not status.valid or status.expires_at is None:
-        return None
-    return AccessKeyGrant(
-        key_prefix=status.key_prefix,
-        key_type=status.key_type,
-        expires_at=status.expires_at,
-        usage_count=status.usage_count,
-    )
-
-
 async def resolve_mvp_entitlement(
     x_access_key: Annotated[Optional[str], Header(alias="X-Access-Key")] = None,
     x_device_id: Annotated[Optional[str], Header(alias="X-Device-Id")] = None,
@@ -92,29 +59,23 @@ async def resolve_mvp_entitlement(
     authorization: Annotated[Optional[str], Header(alias="Authorization")] = None,
     session: Session = Depends(db_session_dep),
 ) -> MvpEntitlement:
-    settings = get_settings()
     user = _optional_user_from_authorization(authorization, session)
-    if user is not None and user.role == "admin":
-        return MvpEntitlement(tier="pro", grant=_admin_grant(), user=user)
-
-    grant = _try_access_key_grant(
+    entitlement = resolve_commercial_entitlement(
         session,
-        raw_key=x_access_key or "",
-        device_id=x_device_id or "",
         user=user,
+        raw_access_key=x_access_key or "",
+        device_id=x_device_id or "",
         email=x_user_email,
+        legacy_api_key=x_access_key or "",
     )
-    if grant is not None:
-        return MvpEntitlement(tier="pro", grant=grant, user=user)
-
-    if (
-        user is not None
-        and user.role != "disabled"
-        and bool(user.email_verified)
-        and settings.mvp_trial_enabled
-    ):
+    if entitlement.tier in (CommercialTier.ADMIN, CommercialTier.PRO):
+        return MvpEntitlement(
+            tier="pro",
+            grant=entitlement.grant or (_admin_grant() if entitlement.source == "admin" else None),
+            user=user,
+        )
+    if entitlement.tier == CommercialTier.TRIAL:
         return MvpEntitlement(tier="trial", grant=None, user=user)
-
     return MvpEntitlement(tier="guest", grant=None, user=user)
 
 
