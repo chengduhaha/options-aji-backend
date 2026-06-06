@@ -162,7 +162,7 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_from_email: str = ""
-    smtp_from_name: str = "OptionsAji"
+    smtp_from_name: str = "Options Aji"
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
     resend_api_key: str = ""
