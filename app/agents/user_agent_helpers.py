@@ -8,6 +8,7 @@ from app.config import Settings
 from app.db.session import SessionLocal
 from app.ingest.message_store import StoredDiscordMessage, list_messages_recent
 from app.ingest.tickers import extract_tickers
+from app.services.discord_menu_authors import resolve_author_filter
 
 
 def infer_message_filter_symbol(*, question: str, ticker_hint: str) -> tuple[str, Optional[str]]:
@@ -41,11 +42,13 @@ def format_discord_digest(*, filter_sym: Optional[str], cfg: Settings) -> tuple[
 
     try:
         with SessionLocal() as session:
+            authors = resolve_author_filter(session, "ai")
             raw_entries: list[StoredDiscordMessage] = list_messages_recent(
                 session,
                 ticker=filter_sym,
                 hours=hours,
                 limit=budget,
+                authors=authors,
             )
     except Exception as exc:
         return (f"[Discord存档读取异常: {type(exc).__name__}]", 0)

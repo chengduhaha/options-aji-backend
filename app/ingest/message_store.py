@@ -106,6 +106,7 @@ def list_messages_recent(
     ticker: Optional[str],
     hours: int,
     limit: int,
+    authors: Optional[list[str]] = None,
 ) -> list[StoredDiscordMessage]:
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
     # Ticker filtering happens client-side below; widen scan so sparse matches still appear.
@@ -114,11 +115,13 @@ def list_messages_recent(
         if ticker is None
         else min(500, max(80, limit * 40))
     )
-    stmt: Select[tuple[DiscordMessageRow]] = (
-        select(DiscordMessageRow)
-        .where(DiscordMessageRow.timestamp >= since)
-        .order_by(DiscordMessageRow.timestamp.desc())
-        .limit(max(1, min(fetch_cap, 2000)))
+    stmt: Select[tuple[DiscordMessageRow]] = select(DiscordMessageRow).where(
+        DiscordMessageRow.timestamp >= since
+    )
+    if authors:
+        stmt = stmt.where(DiscordMessageRow.author.in_(authors))
+    stmt = stmt.order_by(DiscordMessageRow.timestamp.desc()).limit(
+        max(1, min(fetch_cap, 2000))
     )
     rows = list(session.scalars(stmt).all())
     if ticker:
@@ -146,6 +149,7 @@ def list_discord_feed_rows(
     ticker: Optional[str],
     hours: int,
     limit: int,
+    authors: Optional[list[str]] = None,
 ) -> list[StoredDiscordFeedEntry]:
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
     fetch_cap = (
@@ -160,8 +164,11 @@ def list_discord_feed_rows(
             MessageEnrichmentRow.message_id == DiscordMessageRow.id,
         )
         .where(DiscordMessageRow.timestamp >= since)
-        .order_by(DiscordMessageRow.timestamp.desc())
-        .limit(max(1, min(fetch_cap, 2000)))
+    )
+    if authors:
+        stmt = stmt.where(DiscordMessageRow.author.in_(authors))
+    stmt = stmt.order_by(DiscordMessageRow.timestamp.desc()).limit(
+        max(1, min(fetch_cap, 2000))
     )
     pairs = list(session.execute(stmt).all())
     out: list[StoredDiscordFeedEntry] = []

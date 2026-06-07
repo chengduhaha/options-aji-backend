@@ -8,6 +8,7 @@ from sqlalchemy import inspect, text
 from app.db.models import Base
 from app.db.models_user import UserRow  # noqa: F401
 from app.db.session import SessionLocal, engine
+from app.services.discord_menu_authors import seed_discord_menu_author_settings
 from app.services.site_nav import seed_nav_settings
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def init_db() -> None:
     session = SessionLocal()
     try:
         seed_nav_settings(session)
+        seed_discord_menu_author_settings(session)
     finally:
         session.close()
     logger.info("Database tables ready.")

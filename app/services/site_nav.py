@@ -15,6 +15,7 @@ CACHE_KEY_NAV = "site:nav_visibility"
 # All menu ids that can be toggled (admin-only ids excluded from hiding)
 KNOWN_NAV_IDS: tuple[str, ...] = (
     "aji_insights",
+    "twitter_kol",
     "dash",
     "scanner",
     "stock",

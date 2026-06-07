@@ -30,6 +30,7 @@ from app.services.cache_service import TTL_AI, cache_get, cache_set
 from app.services.llm_router import has_llm_provider, post_chat_completions_with_fallback
 from app.services.mvp_market_agent import MvpMarketInsightsPayload, generate_mvp_market_insights
 from app.services.mvp_market_context import build_mvp_market_context
+from app.services.discord_menu_authors import resolve_author_filter
 from app.services.mvp_stock_options_agent import (
     StockOptionsInsightRequest,
     StockOptionsInsightsPayload,
@@ -555,31 +556,50 @@ def _five_minute_bucket_utc() -> str:
     return bucket.isoformat()
 
 
-def _llm_cache_key(events: list[dict[str, Any]], treasury: dict[str, Any], hours: int) -> str:
+def _llm_cache_key(
+    events: list[dict[str, Any]],
+    treasury: dict[str, Any],
+    hours: int,
+    *,
+    authors: Optional[list[str]] = None,
+) -> str:
     raw = json.dumps(
         {
             "events": events[:20],
             "treasury": treasury,
             "hours": hours,
+            "authors": authors or [],
             "bucket": _five_minute_bucket_utc(),
         },
         ensure_ascii=False,
         sort_keys=True,
     )
-    return f"mvp:war-room:v3:{hash(raw)}"
+    return f"mvp:war-room:v4:{hash(raw)}"
 
 
-def _get_cached_war_room_llm(events: list[dict[str, Any]], treasury: dict[str, Any], hours: int) -> dict[str, Any] | None:
-    cached = cache_get(_llm_cache_key(events, treasury, hours))
+def _get_cached_war_room_llm(
+    events: list[dict[str, Any]],
+    treasury: dict[str, Any],
+    hours: int,
+    *,
+    authors: Optional[list[str]] = None,
+) -> dict[str, Any] | None:
+    cached = cache_get(_llm_cache_key(events, treasury, hours, authors=authors))
     return cached if isinstance(cached, dict) else None
 
 
-def _call_war_room_llm(events: list[dict[str, Any]], treasury: dict[str, Any], hours: int) -> dict[str, Any] | None:
+def _call_war_room_llm(
+    events: list[dict[str, Any]],
+    treasury: dict[str, Any],
+    hours: int,
+    *,
+    authors: Optional[list[str]] = None,
+) -> dict[str, Any] | None:
     cfg = get_settings()
     if not has_llm_provider(cfg) or not events:
         return None
-    cache_key = _llm_cache_key(events, treasury, hours)
-    cached = _get_cached_war_room_llm(events, treasury, hours)
+    cache_key = _llm_cache_key(events, treasury, hours, authors=authors)
+    cached = _get_cached_war_room_llm(events, treasury, hours, authors=authors)
     if cached:
         return cached
 
@@ -752,11 +772,19 @@ async def mvp_stock_options_insights(
 def mvp_war_room(
     background_tasks: BackgroundTasks,
     hours: int = Query(default=6, ge=1, le=24),
+    menu_slot: str = Query(default="aji_insights"),
     session: Session = Depends(db_session_dep),
     entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
+    author_filter = resolve_author_filter(session, menu_slot)
     try:
-        rows = list_discord_feed_rows(session, ticker=None, hours=hours, limit=100)
+        rows = list_discord_feed_rows(
+            session,
+            ticker=None,
+            hours=hours,
+            limit=100,
+            authors=author_filter,
+        )
     except Exception as exc:
         logger.warning("MVP war-room discord query failed: %s", exc)
         rows = []
@@ -769,10 +797,20 @@ def mvp_war_room(
         logger.warning("MVP war-room treasury query failed: %s", exc)
         latest_treasury = None
     treasury = _treasury_read(latest_treasury)
-    ai = _get_cached_war_room_llm(discord_events, treasury, hours)
-    war_room_cache_key = _llm_cache_key(discord_events, treasury, hours)
+    ai = _get_cached_war_room_llm(
+        discord_events, treasury, hours, authors=author_filter
+    )
+    war_room_cache_key = _llm_cache_key(
+        discord_events, treasury, hours, authors=author_filter
+    )
     if ai is None and discord_events and _should_schedule_llm(war_room_cache_key):
-        background_tasks.add_task(_call_war_room_llm, discord_events, treasury, hours)
+        background_tasks.add_task(
+            _call_war_room_llm,
+            discord_events,
+            treasury,
+            hours,
+            authors=author_filter,
+        )
 
     events = [_normalize_war_room_event(e) for e in discord_events[:8]]
     trade_plan = _fallback_plan(events, treasury)

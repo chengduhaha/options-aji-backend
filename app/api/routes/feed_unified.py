@@ -20,6 +20,7 @@ from app.ingest.intel_macro import (
     macro_row_timestamp_iso,
 )
 from app.ingest.message_store import list_discord_feed_rows
+from app.services.discord_menu_authors import resolve_author_filter
 from app.services.resonance_feed import resonance_stream_to_feed_fields, social_row_matches_kol_filter
 from app.services.social_sentiment import (
     ResonanceStreamItem,
@@ -127,9 +128,11 @@ def unified_feed(
         default=False,
         description="When true, only include social posts from configured KOL handles.",
     ),
+    menu_slot: str = Query(default="feed"),
     session: Session = Depends(db_session_dep),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> FeedEnvelope:
+    discord_authors = resolve_author_filter(session, menu_slot)
     items: list[FeedItem] = []
     want_signals = kind in (None, "all", "signal")
     want_discord = kind in (None, "all", "discord")
@@ -163,6 +166,7 @@ def unified_feed(
             ticker=ticker,
             hours=hours,
             limit=limit_discord,
+            authors=discord_authors,
         )
         for r in rows:
             items.append(
@@ -265,10 +269,13 @@ def unified_feed_timeline(
         description="ISO timestamp — items strictly older than this (UTC).",
     ),
     hours: int = Query(default=72, ge=1, le=24 * 30),
+    menu_slot: str = Query(default="feed"),
     session: Session = Depends(db_session_dep),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> FeedEnvelope:
     """Time-ordered fusion: Discord + AI signals + macro + stock news."""
+
+    discord_authors = resolve_author_filter(session, menu_slot)
 
     cutoff: Optional[datetime] = None
     if before_timestamp:
@@ -310,6 +317,7 @@ def unified_feed_timeline(
         ticker=ticker,
         hours=hours,
         limit=80,
+        authors=discord_authors,
     )
     for r in rows_dc:
         items.append(

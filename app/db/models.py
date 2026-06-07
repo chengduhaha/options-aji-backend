@@ -293,6 +293,19 @@ class SiteNavSettingsRow(Base):
     updated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
 
 
+class DiscordMenuAuthorSettingsRow(Base):
+    """Per-menu Discord author whitelist — empty list means no filter (show all)."""
+
+    __tablename__ = "discord_menu_author_settings"
+
+    menu_slot: Mapped[str] = mapped_column(String(64), primary_key=True)
+    allowed_authors: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    updated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+
 # ─── Supply Chain Graph ───────────────────────────────────────────────────────
 
 class GraphNodeRow(Base):
