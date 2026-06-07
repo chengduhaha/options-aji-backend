@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -25,6 +25,7 @@ from app.config import get_settings
 from app.services.social_sentiment import build_smart_vs_retail
 
 router = APIRouter(tags=["agent"])
+AGENT_SSE_HEARTBEAT_SECONDS = 10.0
 
 
 class AgentQueryPayload(BaseModel):
@@ -63,6 +64,20 @@ def _build_plan(mode: str) -> list[PlanStep]:
     if mode == "strategy":
         return base + [PlanStep(id="risk", title="评估策略风险收益比", owner="strategy_agent")]
     return base
+
+
+async def _run_thread_with_heartbeats(
+    func: Callable[..., object],
+    *args: object,
+    heartbeat_content: str,
+) -> AsyncIterator[tuple[str, object]]:
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=AGENT_SSE_HEARTBEAT_SECONDS)
+        if task in done:
+            yield "result", task.result()
+            return
+        yield "heartbeat", _event_payload("thinking", heartbeat_content)
 
 
 @router.post("/api/agent/query")
@@ -148,10 +163,18 @@ async def agent_query_stream(
                 ),
             )
 
-            fetch_delta = await asyncio.to_thread(
+            fetch_delta = None
+            async for item_type, item in _run_thread_with_heartbeats(
                 fetch_market_bundle,
                 state,  # type: ignore[arg-type]
-            )
+                heartbeat_content=f"options_flow_analyst 仍在拉取 {sym_g} 行情与期权数据，请稍候。",
+            ):
+                if item_type == "heartbeat":
+                    yield _sse_pack(item)  # type: ignore[arg-type]
+                else:
+                    fetch_delta = item
+            if not isinstance(fetch_delta, dict):
+                raise TypeError("market_fetch_result_not_dict")
             state = {**state, **fetch_delta}
             mb = state.get("market_bundle") or "{}"
             mb_len = len(mb)
@@ -181,10 +204,18 @@ async def agent_query_stream(
                 ),
             )
 
-            synth_delta = await asyncio.to_thread(
+            synth_delta = None
+            async for item_type, item in _run_thread_with_heartbeats(
                 synthesize_llm_answer,
                 state,  # type: ignore[arg-type]
-            )
+                heartbeat_content="synthesis_agent 仍在综合数据并生成回答，请稍候。",
+            ):
+                if item_type == "heartbeat":
+                    yield _sse_pack(item)  # type: ignore[arg-type]
+                else:
+                    synth_delta = item
+            if not isinstance(synth_delta, dict):
+                raise TypeError("synthesis_result_not_dict")
             state = {**state, **synth_delta}
 
             ans_raw = state.get("answer")

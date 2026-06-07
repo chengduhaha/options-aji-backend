@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -84,4 +85,61 @@ def test_agent_sse_events_include_timestamp(monkeypatch: Any) -> None:
             continue
         assert isinstance(ev.get("ts_unix_ms"), int)
         assert int(ev["ts_unix_ms"]) > 0
+    assert any(ev.get("type") == "answer" and ev.get("content") == "测试回答" for ev in events)
+
+
+def test_agent_sse_emits_heartbeat_during_slow_market_fetch(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        agent_route,
+        "AGENT_SSE_HEARTBEAT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        agent_route,
+        "get_settings",
+        lambda: SimpleNamespace(feature_deep_agent_enabled=True),
+    )
+    monkeypatch.setattr(
+        agent_route,
+        "build_initial_agent_state",
+        lambda question, ticker, mode: {
+            "question": question,
+            "ticker_hint": ticker or "",
+            "mode": mode,
+        },
+    )
+    monkeypatch.setattr(
+        agent_route,
+        "gather_discord_snapshot",
+        lambda _state: {"resolved_ticker": "SPY", "discord_context": "digest"},
+    )
+    monkeypatch.setattr(
+        agent_route,
+        "build_smart_vs_retail",
+        lambda _symbol: SimpleNamespace(retail_direction="bullish", retail_sentiment_score=72),
+    )
+
+    def slow_market_fetch(_state: dict[str, Any]) -> dict[str, str]:
+        time.sleep(0.05)
+        return {"market_bundle": '{"k":"v"}'}
+
+    monkeypatch.setattr(agent_route, "fetch_market_bundle", slow_market_fetch)
+    monkeypatch.setattr(
+        agent_route,
+        "synthesize_llm_answer",
+        lambda _state: {"answer": "测试回答"},
+    )
+
+    client = _build_client()
+    resp = client.post(
+        "/api/agent/query",
+        json={"question": "分析SPY", "ticker": "SPY", "mode": "analysis"},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse_payloads(resp.text)
+
+    assert any(
+        ev.get("type") == "thinking" and "options_flow_analyst 仍在拉取" in str(ev.get("content"))
+        for ev in events
+    )
     assert any(ev.get("type") == "answer" and ev.get("content") == "测试回答" for ev in events)
