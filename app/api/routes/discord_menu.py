@@ -1,6 +1,7 @@
 """Discord menu author whitelist — admin configure, users read."""
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from app.services.discord_author_profiles import (
     save_avatar_file,
     upsert_profile_fields,
 )
+from app.services.cache_service import TTL_HOT, cache_get, cache_set
 from app.services.discord_menu_authors import (
     DISCORD_MENU_SLOT_LABELS,
     KNOWN_DISCORD_MENU_SLOTS,
@@ -33,6 +35,7 @@ from app.services.discord_menu_authors import (
     resolve_author_filter,
     save_settings,
 )
+from app.services.locale import Locale, parse_locale, pick_list, pick_text
 
 router = APIRouter(tags=["discord-menu"])
 
@@ -67,8 +70,12 @@ class DiscordTimelineItem(BaseModel):
     tickers: list[str] = Field(default_factory=list)
     author: str | None = None
     raw_body: str | None = None
+    bullets: list[str] | None = None
     bullets_zh: list[str] | None = None
+    bullets_en: list[str] | None = None
+    risk_note: str | None = None
     risk_note_zh: str | None = None
+    risk_note_en: str | None = None
     display_name: str | None = None
     avatar_url: str | None = None
 
@@ -87,7 +94,9 @@ class KolHubItemPayload(BaseModel):
     message_count: int
     last_seen_utc: str
     avatar_url: str | None = None
+    bio: str | None = None
     bio_zh: str | None = None
+    bio_en: str | None = None
     twitter_handle: str | None = None
 
 
@@ -140,35 +149,51 @@ def _parse_before_timestamp(raw: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _authors_cache_token(authors: list[str] | None) -> str:
+    if not authors:
+        return "all"
+    return hashlib.sha256(",".join(sorted(authors)).encode()).hexdigest()[:16]
+
+
 def _timeline_item_from_row(
     r: StoredDiscordFeedEntry,
     *,
     display_name: str | None = None,
     avatar_url: str | None = None,
+    locale: Locale = "zh",
 ) -> DiscordTimelineItem:
-    has_zh = bool(
-        (r.enrichment_title_zh or "").strip()
-        or (r.enrichment_summary_zh or "").strip()
-        or r.enrichment_bullets_zh
+    bullets_zh = [b for b in r.enrichment_bullets_zh if str(b).strip()]
+    bullets_en = [b for b in r.enrichment_bullets_en if str(b).strip()]
+    title = pick_text(
+        zh=r.enrichment_title_zh,
+        en=r.enrichment_title_en,
+        raw=display_name or r.author or "Discord",
+        locale=locale,
     )
-    if has_zh:
-        title = (r.enrichment_title_zh or "").strip() or (display_name or r.author or "Discord")
-        body = ((r.enrichment_summary_zh or "").strip() or (r.content or "")[:2000])[:4000]
-        bullets = [b for b in r.enrichment_bullets_zh if str(b).strip()] or None
-    else:
-        title = display_name or r.author or "Discord"
-        body = (r.content or "")[:2000]
-        bullets = None
+    body = pick_text(
+        zh=r.enrichment_summary_zh,
+        en=r.enrichment_summary_en,
+        raw=(r.content or "")[:2000],
+        locale=locale,
+    )[:4000]
+    bullets = pick_list(zh=bullets_zh, en=bullets_en, locale=locale) or None
+    risk_zh = (r.enrichment_risk_zh or "").strip() or None
+    risk_en = (r.enrichment_risk_en or "").strip() or None
+    risk_note = pick_text(zh=risk_zh, en=risk_en, locale=locale) or None
     return DiscordTimelineItem(
         id=f"dc-{r.id}",
         created_at_utc=r.timestamp_utc_iso,
-        title=title,
+        title=title or (display_name or r.author or "Discord"),
         body=body,
         tickers=list(r.tickers),
         author=r.author,
         raw_body=r.content,
-        bullets_zh=bullets,
-        risk_note_zh=(r.enrichment_risk_zh or "").strip() or None,
+        bullets=bullets,
+        bullets_zh=bullets_zh or None,
+        bullets_en=bullets_en or None,
+        risk_note=risk_note,
+        risk_note_zh=risk_zh,
+        risk_note_en=risk_en,
         display_name=display_name,
         avatar_url=avatar_url,
     )
@@ -309,10 +334,17 @@ def serve_kol_avatar(filename: str) -> FileResponse:
 def discord_kol_hub(
     menu_slot: str = Query(default="twitter_kol"),
     hours: int = Query(default=168, ge=1, le=24 * 30),
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     session: Session = Depends(db_session_dep),
 ) -> KolHubResponse:
+    loc = parse_locale(locale)
+    cache_key = f"discord:kol-hub:v1:{menu_slot}:{hours}:{loc}"
+    cached = cache_get(cache_key)
+    if isinstance(cached, dict):
+        return KolHubResponse.model_validate(cached)
+
     entries = list_kol_hub(session, menu_slot=menu_slot, hours=hours)
-    return KolHubResponse(
+    response = KolHubResponse(
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         menu_slot=menu_slot,
         items=[
@@ -322,12 +354,16 @@ def discord_kol_hub(
                 message_count=e.message_count,
                 last_seen_utc=e.last_seen_utc,
                 avatar_url=e.avatar_url,
+                bio=pick_text(zh=e.bio_zh, en=e.bio_en, locale=loc) or None,
                 bio_zh=e.bio_zh,
+                bio_en=e.bio_en,
                 twitter_handle=e.twitter_handle,
             )
             for e in entries
         ],
     )
+    cache_set(cache_key, response.model_dump(), ttl=TTL_HOT)
+    return response
 
 
 @router.get("/api/site/discord-menu-authors", response_model=DiscordMenuAuthorsResponse)
@@ -359,12 +395,23 @@ def discord_timeline(
     ticker: str | None = Query(default=None),
     authors: str | None = Query(default=None, description="Comma-separated author filter"),
     before_timestamp: str | None = Query(default=None),
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     session: Session = Depends(db_session_dep),
 ) -> DiscordTimelineEnvelope:
+    loc = parse_locale(locale)
     menu_authors = resolve_author_filter(session, menu_slot)
     requested = parse_authors_csv(authors)
     merged_authors = merge_author_filters(menu_authors, requested)
     before_dt = _parse_before_timestamp(before_timestamp)
+    authors_token = _authors_cache_token(merged_authors)
+    before_token = before_dt.isoformat() if before_dt else "head"
+    cache_key = (
+        f"discord:timeline:v1:{menu_slot}:{hours}:{limit}:{authors_token}:"
+        f"{before_token}:{ticker or 'all'}:{loc}"
+    )
+    cached = cache_get(cache_key)
+    if isinstance(cached, dict):
+        return DiscordTimelineEnvelope.model_validate(cached)
 
     fetch_limit = limit + 1
     rows = list_discord_feed_rows(
@@ -378,15 +425,36 @@ def discord_timeline(
     has_more = len(rows) > limit
     page_rows = rows[:limit]
 
-    hub = {e.author: e for e in list_kol_hub(session, menu_slot=menu_slot, hours=hours)}
+    hub_cache_key = f"discord:kol-hub:v1:{menu_slot}:{hours}:{loc}"
+    hub_cached = cache_get(hub_cache_key)
+    if isinstance(hub_cached, dict) and isinstance(hub_cached.get("items"), list):
+        hub = {
+            str(item.get("author")): item
+            for item in hub_cached["items"]
+            if isinstance(item, dict) and item.get("author")
+        }
+    else:
+        hub_entries = list_kol_hub(session, menu_slot=menu_slot, hours=hours)
+        hub = {e.author: e for e in hub_entries}
+
     items: list[DiscordTimelineItem] = []
     for r in page_rows:
         meta = hub.get(r.author or "")
+        if isinstance(meta, dict):
+            display_name = meta.get("display_name")
+            avatar_url = meta.get("avatar_url")
+        elif meta is not None:
+            display_name = meta.display_name
+            avatar_url = meta.avatar_url
+        else:
+            display_name = None
+            avatar_url = None
         items.append(
             _timeline_item_from_row(
                 r,
-                display_name=meta.display_name if meta else None,
-                avatar_url=meta.avatar_url if meta else None,
+                display_name=str(display_name) if display_name else None,
+                avatar_url=str(avatar_url) if avatar_url else None,
+                locale=loc,
             )
         )
 
@@ -397,10 +465,12 @@ def discord_timeline(
         )
         next_before = _cursor_timestamp_iso(last_ts)
 
-    return DiscordTimelineEnvelope(
+    response = DiscordTimelineEnvelope(
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         menu_slot=menu_slot,
         items=items,
         next_before=next_before,
         has_more=has_more,
     )
+    cache_set(cache_key, response.model_dump(), ttl=TTL_HOT)
+    return response

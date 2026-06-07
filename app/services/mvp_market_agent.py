@@ -17,6 +17,7 @@ from app.analytics.market_regime import (
     regime_label,
 )
 from app.services.cache_service import TTL_AI, cache_get, cache_set
+from app.services.locale import Locale, parse_locale
 from app.services.llm_router import build_chat_openai, configured_providers, has_llm_provider
 
 try:
@@ -68,13 +69,13 @@ def _five_minute_bucket_utc() -> str:
     return now.replace(minute=bucket_min, second=0, microsecond=0).isoformat()
 
 
-def _cache_key(context: dict[str, Any]) -> str:
+def _cache_key(context: dict[str, Any], locale: Locale) -> str:
     raw = json.dumps(
-        {"bucket": _five_minute_bucket_utc(), "ctx": _context_fingerprint(context)},
+        {"bucket": _five_minute_bucket_utc(), "ctx": _context_fingerprint(context), "locale": locale},
         ensure_ascii=False,
         sort_keys=True,
     )
-    return f"mvp:market-insights:v1:{hash(raw)}"
+    return f"mvp:market-insights:v2:{hash(raw)}"
 
 
 def _context_fingerprint(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -109,7 +110,7 @@ def _num(value: Any) -> float | None:
     return None
 
 
-def _rule_based_insights(context: dict[str, Any]) -> MvpMarketInsightsPayload:
+def _rule_based_insights(context: dict[str, Any], locale: Locale = "zh") -> MvpMarketInsightsPayload:
     ov = context.get("overview") if isinstance(context.get("overview"), dict) else {}
     vol = ov.get("volatility") if isinstance(ov.get("volatility"), dict) else {}
     liq = ov.get("liquidity") if isinstance(ov.get("liquidity"), dict) else {}
@@ -153,11 +154,18 @@ def _rule_based_insights(context: dict[str, Any]) -> MvpMarketInsightsPayload:
         elif d == "bear":
             signal_score -= st
 
-    basis = [
-        f"SPY 涨跌 {spy_chg if spy_chg is not None else '—'}%，QQQ {qqq_chg if qqq_chg is not None else '—'}%",
-        f"VIX {vix if vix is not None else '—'}（{band}），日变化 {vix_chg if vix_chg is not None else '—'}%",
-        f"信号综合得分 {signal_score}",
-    ]
+    if locale == "en":
+        basis = [
+            f"SPY {spy_chg if spy_chg is not None else '—'}%, QQQ {qqq_chg if qqq_chg is not None else '—'}%",
+            f"VIX {vix if vix is not None else '—'} ({band}), daily {vix_chg if vix_chg is not None else '—'}%",
+            f"Signal score {signal_score}",
+        ]
+    else:
+        basis = [
+            f"SPY 涨跌 {spy_chg if spy_chg is not None else '—'}%，QQQ {qqq_chg if qqq_chg is not None else '—'}%",
+            f"VIX {vix if vix is not None else '—'}（{band}），日变化 {vix_chg if vix_chg is not None else '—'}%",
+            f"信号综合得分 {signal_score}",
+        ]
 
     code, label, summary, reasoning = classify_regime_from_metrics(
         avg_index=avg_index,
@@ -165,35 +173,76 @@ def _rule_based_insights(context: dict[str, Any]) -> MvpMarketInsightsPayload:
         vix_chg=vix_chg,
         vix_band=band,
         signal_score=signal_score,
+        locale=locale,
     )
 
     if len(vix_series) >= 2:
         first, last = vix_series[0], vix_series[-1]
         delta = last - first
-        if delta > 1.5:
+        if locale == "en":
+            if delta > 1.5:
+                chart_cap = (
+                    f"Over {len(vix_series)} sessions VIX rose from {first:.1f} to {last:.1f}; "
+                    "fear is building and option premiums/hedge demand are rising."
+                )
+            elif delta < -1.5:
+                chart_cap = (
+                    f"Over {len(vix_series)} sessions VIX fell from {first:.1f} to {last:.1f}; "
+                    "vol premium is easing and risk appetite is repairing."
+                )
+            else:
+                chart_cap = (
+                    f"VIX ranged {min(vix_series):.1f}–{max(vix_series):.1f} over {len(vix_series)} "
+                    "sessions without a one-sided vol shock."
+                )
+        elif delta > 1.5:
             chart_cap = f"近 {len(vix_series)} 日 VIX 由 {first:.1f} 升至 {last:.1f}，恐慌情绪升温，期权溢价与对冲需求抬升。"
         elif delta < -1.5:
             chart_cap = f"近 {len(vix_series)} 日 VIX 由 {first:.1f} 回落至 {last:.1f}，波动溢价回落，风险偏好修复中。"
         else:
             chart_cap = f"近 {len(vix_series)} 日 VIX 在 {min(vix_series):.1f}–{max(vix_series):.1f} 区间震荡，波动环境未出现单边恶化。"
     else:
-        chart_cap = "VIX 历史序列不足，暂以当日水平与区间标签为主判断。"
+        chart_cap = (
+            "Insufficient VIX history; rely on spot level and band label."
+            if locale == "en"
+            else "VIX 历史序列不足，暂以当日水平与区间标签为主判断。"
+        )
 
     if vix is not None:
-        if vix > 30:
+        if locale == "en":
+            if vix > 30:
+                vix_txt = f"VIX {vix:.1f} is in panic territory — avoid naked short vol; prioritize hedges."
+            elif vix > 20:
+                vix_txt = f"VIX {vix:.1f} is elevated; premiums are rich and sellers need wider cushions."
+            elif vix < 13:
+                vix_txt = f"VIX {vix:.1f} is very low; watch for mean reversion in vol."
+            else:
+                vix_txt = f"VIX {vix:.1f} is in a normal band; read it with curve shape."
+        elif vix > 30:
             vix_txt = f"VIX {vix:.1f} 处于恐慌区，避免裸卖期权，优先对冲与降杠杆。"
         elif vix > 20:
             vix_txt = f"VIX {vix:.1f} 偏高，期权溢价明显，卖方需更宽安全边际。"
-        elif vix is not None and vix < 13:
+        elif vix < 13:
             vix_txt = f"VIX {vix:.1f} 极低，警惕波动率均值回归。"
         else:
             vix_txt = f"VIX {vix:.1f} 处于常规区间，结合曲线形态判断方向。"
     else:
-        vix_txt = "VIX 数据缺失。"
+        vix_txt = "VIX data unavailable." if locale == "en" else "VIX 数据缺失。"
 
     pcr = _num(liq.get("putCallRatioVolumeApprox")) or _num(liq.get("putCallRatioEquityCboe"))
     if pcr is None:
-        pcr_txt = "P/C 数据缺失。"
+        pcr_txt = "P/C data unavailable." if locale == "en" else "P/C 数据缺失。"
+    elif locale == "en":
+        if pcr > 1.2:
+            pcr_txt = f"P/C {pcr:.2f}: heavy put activity — cautious tone; watch for sentiment reversals."
+        elif pcr > 1:
+            pcr_txt = f"P/C {pcr:.2f}: puts relatively active; hedging demand is rising."
+        elif pcr < 0.5:
+            pcr_txt = f"P/C {pcr:.2f}: call surge — bullish chase; pullback risk rises."
+        elif pcr < 0.7:
+            pcr_txt = f"P/C {pcr:.2f}: calls relatively active; risk appetite optimistic."
+        else:
+            pcr_txt = f"P/C {pcr:.2f}: call/put volume fairly balanced."
     elif pcr > 1.2:
         pcr_txt = f"P/C {pcr:.2f}：Put 异常活跃，情绪偏谨慎，需警惕过度悲观后的反向波动。"
     elif pcr > 1:
@@ -205,7 +254,7 @@ def _rule_based_insights(context: dict[str, Any]) -> MvpMarketInsightsPayload:
     else:
         pcr_txt = f"P/C {pcr:.2f}：多空成交量相对均衡。"
 
-    treasury = _treasury_from_context(context)
+    treasury = _treasury_from_context(context, locale=locale)
     return MvpMarketInsightsPayload(
         regime=RegimeInsight(code=code, label=label, summary=summary, reasoning=reasoning, basis=basis),
         vix_chart=VixChartInsight(caption=chart_cap),
@@ -217,7 +266,7 @@ def _rule_based_insights(context: dict[str, Any]) -> MvpMarketInsightsPayload:
     )
 
 
-def _treasury_from_context(context: dict[str, Any]) -> TreasuryInsight:
+def _treasury_from_context(context: dict[str, Any], *, locale: Locale = "zh") -> TreasuryInsight:
     tr = context.get("treasury") if isinstance(context.get("treasury"), dict) else {}
     rates = tr.get("rates") if isinstance(tr.get("rates"), list) else []
     latest = rates[0] if rates and isinstance(rates[0], dict) else {}
@@ -235,31 +284,53 @@ def _treasury_from_context(context: dict[str, Any]) -> TreasuryInsight:
     }
     if spread_10y_2y is None:
         return TreasuryInsight(
-            label="等待利率数据",
-            summary="国债曲线缺少关键期限，暂时只把柱状图作为利率水平参考。",
+            label="Awaiting rates" if locale == "en" else "等待利率数据",
+            summary=(
+                "Key Treasury tenors missing; use the yield chart only as a level reference."
+                if locale == "en"
+                else "国债曲线缺少关键期限，暂时只把柱状图作为利率水平参考。"
+            ),
             spreads=spreads,
         )
     if spread_10y_2y < -0.25:
         return TreasuryInsight(
-            label="曲线深度倒挂",
-            summary="2Y 高于 10Y，市场仍在交易降息和增长放缓预期；成长股反弹更依赖利率回落和风险偏好修复。",
+            label="Deep inversion" if locale == "en" else "曲线深度倒挂",
+            summary=(
+                "2Y above 10Y — market still prices cuts/slowdown; growth rebounds need lower "
+                "rates and better risk appetite."
+                if locale == "en"
+                else "2Y 高于 10Y，市场仍在交易降息和增长放缓预期；成长股反弹更依赖利率回落和风险偏好修复。"
+            ),
             spreads=spreads,
         )
     if spread_10y_2y < 0:
         return TreasuryInsight(
-            label="曲线轻度倒挂",
-            summary="短端仍高于长端，但倒挂不深；盘中重点看 10Y 是否继续上行，长端上行会压制 QQQ/NVDA 这类久期资产。",
+            label="Mild inversion" if locale == "en" else "曲线轻度倒挂",
+            summary=(
+                "Front end still above the belly; watch whether 10Y keeps rising — higher long "
+                "rates pressure QQQ/NVDA duration."
+                if locale == "en"
+                else "短端仍高于长端，但倒挂不深；盘中重点看 10Y 是否继续上行，长端上行会压制 QQQ/NVDA 这类久期资产。"
+            ),
             spreads=spreads,
         )
     if spread_30y_10y is not None and spread_30y_10y > 0.25:
         return TreasuryInsight(
-            label="长端偏陡",
-            summary="30Y 相对 10Y 偏高，长端期限溢价抬升；若伴随美元走强，成长股追高需降仓位。",
+            label="Steep long end" if locale == "en" else "长端偏陡",
+            summary=(
+                "30Y rich vs 10Y — term premium rising; if USD strengthens, chase growth more carefully."
+                if locale == "en"
+                else "30Y 相对 10Y 偏高，长端期限溢价抬升；若伴随美元走强，成长股追高需降仓位。"
+            ),
             spreads=spreads,
         )
     return TreasuryInsight(
-        label="曲线相对正常",
-        summary="2Y/10Y 未明显倒挂，利率曲线对风险资产的压制相对有限，盘中更应关注指数和波动率确认。",
+        label="Normal curve" if locale == "en" else "曲线相对正常",
+        summary=(
+            "2Y/10Y not deeply inverted; curve is a smaller headwind — focus on index/vol confirmation."
+            if locale == "en"
+            else "2Y/10Y 未明显倒挂，利率曲线对风险资产的压制相对有限，盘中更应关注指数和波动率确认。"
+        ),
         spreads=spreads,
     )
 
@@ -413,9 +484,14 @@ def _build_mvp_market_agent() -> Any:
     return agent
 
 
-async def generate_mvp_market_insights(context: dict[str, Any]) -> MvpMarketInsightsPayload:
+async def generate_mvp_market_insights(
+    context: dict[str, Any],
+    *,
+    locale: Locale = "zh",
+) -> MvpMarketInsightsPayload:
     """DeepAgents 推理；失败则规则兜底。"""
-    cache_key = _cache_key(context)
+    loc = parse_locale(locale)
+    cache_key = _cache_key(context, loc)
     cached = cache_get(cache_key)
     if isinstance(cached, dict):
         try:
@@ -427,12 +503,17 @@ async def generate_mvp_market_insights(context: dict[str, Any]) -> MvpMarketInsi
 
     if not has_llm_provider():
         logger.info("No LLM provider configured; MVP market insights use rules")
-        return _rule_based_insights(context)
+        return _rule_based_insights(context, loc)
 
     agent = _build_mvp_market_agent()
     user_payload = json.dumps(context, ensure_ascii=False)[:16000]
+    lang_hint = (
+        "Output all text fields in English."
+        if loc == "en"
+        else "所有文本字段使用中文。"
+    )
     prompt = (
-        "根据以下市场快照输出 JSON（严格遵循 system 中的 schema）：\n\n"
+        f"{lang_hint}\n根据以下市场快照输出 JSON（严格遵循 system 中的 schema）：\n\n"
         f"{user_payload}"
     )
     engine: EngineKind = "deepagents" if create_deep_agent is not None else "fallback"
@@ -444,13 +525,13 @@ async def generate_mvp_market_insights(context: dict[str, Any]) -> MvpMarketInsi
             built = _payload_from_parsed(parsed, engine)
             if built and built.regime.summary and built.vix_chart.caption:
                 if not built.treasury.spreads:
-                    rule_t = _treasury_from_context(context)
+                    rule_t = _treasury_from_context(context, locale=loc)
                     built.treasury.spreads = rule_t.spreads
                 cache_set(cache_key, built.model_dump(), ttl=TTL_AI)
                 return built
     except Exception as exc:
         logger.warning("MVP market insights agent failed: %s", exc)
 
-    fallback = _rule_based_insights(context)
+    fallback = _rule_based_insights(context, loc)
     cache_set(cache_key, fallback.model_dump(), ttl=min(TTL_AI, 300))
     return fallback

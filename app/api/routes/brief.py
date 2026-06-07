@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.api.deps import bearer_subscription_optional
@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.db.session import SessionLocal
 from app.db.models import StockNewsRow
 from app.services.cache_service import TTL_AI, cache_get, cache_set, key_ai_market_summary
+from app.services.locale import Locale, parse_locale
 from app.services.llm_router import build_chat_openai, has_llm_provider
 from app.analytics.gex_compute import compute_gex_profile
 from sqlalchemy import select, desc
@@ -103,11 +104,15 @@ def _fetch_market_data() -> dict[str, object]:
     return ctx
 
 
-def _generate_brief_text(data: dict[str, object]) -> str:
+def _generate_brief_text(data: dict[str, object], locale: Locale = "zh") -> str:
     """Call LLM to synthesize a market brief."""
     cfg = get_settings()
     if not has_llm_provider(cfg):
-        return "服务端未配置 LLM Provider，无法生成市场简报。"
+        return (
+            "LLM provider is not configured; market brief unavailable."
+            if locale == "en"
+            else "服务端未配置 LLM Provider，无法生成市场简报。"
+        )
 
     llm = build_chat_openai(
         cfg,
@@ -118,8 +123,9 @@ def _generate_brief_text(data: dict[str, object]) -> str:
         max_retries=1,
     )
 
+    lang = "English" if locale == "en" else "中文"
     system = (
-        "你是美股期权与市场结构分析师 OptionsAji。用中文生成每日市场简报。\n"
+        f"你是美股期权与市场结构分析师 OptionsAji。用{lang}生成每日市场简报。\n"
         "格式要求：\n"
         "━━━ 大盘环境 ━━━━━\n"
         "SPY $xxx (x.xx%) | VIX x.xx | P/C x.xx\n\n"
@@ -142,22 +148,31 @@ def _generate_brief_text(data: dict[str, object]) -> str:
         return "" if text is None else str(text)
     except Exception as exc:
         logger.exception("Brief generation failed: %s", exc)
-        return "生成市场简报失败，请稍后重试。"
+        return (
+            "Failed to generate market brief. Please try again later."
+            if locale == "en"
+            else "生成市场简报失败，请稍后重试。"
+        )
 
 
 @router.get("/brief")
-def get_market_brief(_=Depends(bearer_subscription_optional)) -> dict:
+def get_market_brief(
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
+    _=Depends(bearer_subscription_optional),
+) -> dict:
     """Return cached or freshly generated market brief."""
-    cached = cache_get(key_ai_market_summary())
+    loc = parse_locale(locale)
+    cache_key = key_ai_market_summary(loc)
+    cached = cache_get(cache_key)
     if cached and isinstance(cached, dict) and cached.get("brief"):
         return cached
 
     data = _fetch_market_data()
-    brief = _generate_brief_text(data)
+    brief = _generate_brief_text(data, loc)
     result = {
         "brief": brief,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_snapshot": data,
     }
-    cache_set(key_ai_market_summary(), result, ttl=TTL_AI)
+    cache_set(cache_key, result, ttl=TTL_AI)
     return result

@@ -35,6 +35,7 @@ class KolHubEntry:
     last_seen_utc: str
     avatar_url: str | None
     bio_zh: str | None
+    bio_en: str | None
     twitter_handle: str | None
 
 
@@ -196,6 +197,7 @@ def list_kol_hub(session: Session, *, menu_slot: str, hours: int) -> list[KolHub
                 last_seen_utc=s.last_seen_utc,
                 avatar_url=avatar_url,
                 bio_zh=(prof.bio_zh if prof else None),
+                bio_en=(prof.bio_en if prof else None),
                 twitter_handle=(prof.twitter_handle if prof else None),
             )
         )

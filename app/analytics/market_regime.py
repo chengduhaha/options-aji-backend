@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from app.services.locale import Locale
+
 RegimeCode = Literal["risk_off", "elevated_vol", "risk_on", "range_bound", "transitional"]
 
 VALID_REGIME_CODES: frozenset[str] = frozenset(
@@ -60,6 +62,49 @@ REGIME_CATALOG: dict[RegimeCode, RegimeMeta] = {
     },
 }
 
+REGIME_CATALOG_EN: dict[RegimeCode, RegimeMeta] = {
+    "risk_off": {
+        "label": "Risk-Off",
+        "summary_template": (
+            "Cross-asset data shows rising risk aversion (Risk-Off); indices are weak or "
+            "volatility is spiking. Options traders should review exposure and hedges before "
+            "assuming direction."
+        ),
+    },
+    "elevated_vol": {
+        "label": "Elevated Vol",
+        "summary_template": (
+            "Volatility is elevated and directional signals are mixed. Option premiums, gamma, "
+            "and hedging costs matter more for pricing."
+        ),
+    },
+    "risk_on": {
+        "label": "Risk-On",
+        "summary_template": (
+            "Risk appetite is constructive (Risk-On); indices are relatively stable and vol is "
+            "not spiking. Watch sector leadership and term structure — not a buy signal by itself."
+        ),
+    },
+    "range_bound": {
+        "label": "Range-Bound",
+        "summary_template": (
+            "Indices and sentiment are range-bound with limited impulse. Wait for price/volume "
+            "and volatility to confirm a breakout."
+        ),
+    },
+    "transitional": {
+        "label": "Transitional",
+        "summary_template": (
+            "Index, volatility, and sentiment metrics disagree — a transitional regime. Reduce "
+            "assumptions until more cross-checks align."
+        ),
+    },
+}
+
+
+def regime_catalog(locale: Locale) -> dict[RegimeCode, RegimeMeta]:
+    return REGIME_CATALOG_EN if locale == "en" else REGIME_CATALOG
+
 
 def normalize_regime_code(code: Any, label: Any = None) -> RegimeCode | None:
     raw_code = str(code or "").strip()
@@ -71,8 +116,8 @@ def normalize_regime_code(code: Any, label: Any = None) -> RegimeCode | None:
     return None
 
 
-def regime_label(code: RegimeCode) -> str:
-    return REGIME_CATALOG[code]["label"]
+def regime_label(code: RegimeCode, locale: Locale = "zh") -> str:
+    return regime_catalog(locale)[code]["label"]
 
 
 def classify_regime_from_metrics(
@@ -82,37 +127,64 @@ def classify_regime_from_metrics(
     vix_chg: float | None,
     vix_band: str,
     signal_score: int,
+    locale: Locale = "zh",
 ) -> tuple[RegimeCode, str, str, str]:
     """规则分类：返回 (code, label, summary, reasoning)。"""
     band = vix_band or ""
-    high_vol_band = "高波动" in band or "极端" in band
+    high_vol_band = "高波动" in band or "极端" in band or "elevated" in band.lower()
 
     if avg_index <= -0.35 or (vix_chg is not None and vix_chg > 3) or signal_score <= -5:
         code: RegimeCode = "risk_off"
-        triggers: list[str] = []
-        if avg_index <= -0.35:
-            triggers.append("指数均值偏弱")
-        if vix_chg is not None and vix_chg > 3:
-            triggers.append("VIX 日涨幅偏大")
-        if signal_score <= -5:
-            triggers.append("综合信号偏空")
-        reasoning = f"归类为避险环境（Risk-Off）：{'、'.join(triggers)}。"
+        if locale == "en":
+            triggers: list[str] = []
+            if avg_index <= -0.35:
+                triggers.append("index average weak")
+            if vix_chg is not None and vix_chg > 3:
+                triggers.append("VIX daily jump")
+            if signal_score <= -5:
+                triggers.append("bearish signal score")
+            reasoning = f"Classified as Risk-Off: {', '.join(triggers)}."
+        else:
+            triggers = []
+            if avg_index <= -0.35:
+                triggers.append("指数均值偏弱")
+            if vix_chg is not None and vix_chg > 3:
+                triggers.append("VIX 日涨幅偏大")
+            if signal_score <= -5:
+                triggers.append("综合信号偏空")
+            reasoning = f"归类为避险环境（Risk-Off）：{'、'.join(triggers)}。"
     elif (
         (vix is not None and vix >= 22)
         or (vix is not None and vix >= 18 and vix_chg is not None and vix_chg > 1.5)
         or high_vol_band
     ):
         code = "elevated_vol"
-        reasoning = "归类为高波动环境：VIX 水平或日变化偏高，方向信号未一致。"
+        reasoning = (
+            "Classified as elevated vol: VIX level or daily change is high with mixed direction."
+            if locale == "en"
+            else "归类为高波动环境：VIX 水平或日变化偏高，方向信号未一致。"
+        )
     elif avg_index >= 0.35 and (vix_chg is None or vix_chg < 2) and signal_score >= 0:
         code = "risk_on"
-        reasoning = "归类为风险偏好（Risk-On）：指数偏强、VIX 未急升、信号非偏空。"
+        reasoning = (
+            "Classified as Risk-On: indices firm, VIX not spiking, signals not bearish."
+            if locale == "en"
+            else "归类为风险偏好（Risk-On）：指数偏强、VIX 未急升、信号非偏空。"
+        )
     elif abs(avg_index) < 0.2 and abs(signal_score) <= 2 and (vix_chg is None or abs(vix_chg) < 1.5):
         code = "range_bound"
-        reasoning = "归类为中性震荡：指数与信号波动有限、VIX 变化温和。"
+        reasoning = (
+            "Classified as range-bound: limited index/signal movement and mild VIX change."
+            if locale == "en"
+            else "归类为中性震荡：指数与信号波动有限、VIX 变化温和。"
+        )
     else:
         code = "transitional"
-        reasoning = "归类为过渡观察：指标之间存在分歧，暂无单一主导环境。"
+        reasoning = (
+            "Classified as transitional: mixed signals, no dominant regime yet."
+            if locale == "en"
+            else "归类为过渡观察：指标之间存在分歧，暂无单一主导环境。"
+        )
 
-    meta = REGIME_CATALOG[code]
+    meta = regime_catalog(locale)[code]
     return code, meta["label"], meta["summary_template"], reasoning

@@ -54,6 +54,10 @@ class StoredDiscordFeedEntry:
     enrichment_summary_zh: Optional[str]
     enrichment_bullets_zh: tuple[str, ...]
     enrichment_risk_zh: Optional[str]
+    enrichment_title_en: Optional[str]
+    enrichment_summary_en: Optional[str]
+    enrichment_bullets_en: tuple[str, ...]
+    enrichment_risk_en: Optional[str]
     enrichment_lang: Optional[str]
 
 
@@ -199,9 +203,12 @@ def list_discord_feed_rows(
             ticker_u = ticker.strip().upper()
             if ticker_u not in list(row.tickers or []):
                 continue
-        bullets: tuple[str, ...] = ()
+        bullets_zh: tuple[str, ...] = ()
+        bullets_en: tuple[str, ...] = ()
         if enr is not None and enr.bullets_zh:
-            bullets = tuple(str(b) for b in enr.bullets_zh if str(b).strip())
+            bullets_zh = tuple(str(b) for b in enr.bullets_zh if str(b).strip())
+        if enr is not None and enr.bullets_en:
+            bullets_en = tuple(str(b) for b in enr.bullets_en if str(b).strip())
         out.append(
             StoredDiscordFeedEntry(
                 id=row.id,
@@ -212,8 +219,12 @@ def list_discord_feed_rows(
                 tickers=list(row.tickers or []),
                 enrichment_title_zh=enr.title_zh if enr else None,
                 enrichment_summary_zh=enr.summary_zh if enr else None,
-                enrichment_bullets_zh=bullets,
+                enrichment_bullets_zh=bullets_zh,
                 enrichment_risk_zh=enr.risk_note_zh if enr else None,
+                enrichment_title_en=enr.title_en if enr else None,
+                enrichment_summary_en=enr.summary_en if enr else None,
+                enrichment_bullets_en=bullets_en,
+                enrichment_risk_en=enr.risk_note_en if enr else None,
                 enrichment_lang=enr.language_detected if enr else None,
             )
         )

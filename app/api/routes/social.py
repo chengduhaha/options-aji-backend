@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
+from app.services.locale import parse_locale, pick_text
 from app.services.social_sentiment import (
     KolDirectoryResponse,
     ResonanceStreamResponse,
@@ -60,8 +61,10 @@ def social_radar(
 @router.get("/smart-vs-retail/{symbol}", response_model=SmartVsRetailSnapshot)
 def smart_vs_retail(
     symbol: str,
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> SmartVsRetailSnapshot:
+    loc = parse_locale(locale)
     cfg = get_settings()
     if not cfg.feature_social_enabled:
         return SmartVsRetailSnapshot(
@@ -79,4 +82,10 @@ def smart_vs_retail(
             ai_narrative_zh="social feature disabled",
             confidence=0.0,
         )
-    return build_smart_vs_retail(symbol)
+    snapshot = build_smart_vs_retail(symbol)
+    narrative = pick_text(
+        zh=snapshot.ai_narrative_zh,
+        en=getattr(snapshot, "ai_narrative_en", None),
+        locale=loc,
+    )
+    return snapshot.model_copy(update={"ai_narrative_zh": narrative})

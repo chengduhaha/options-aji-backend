@@ -31,6 +31,10 @@ class _EnrichmentLLMOut(BaseModel):
     summary_zh: str = ""
     bullets_zh: list[str] = Field(default_factory=list)
     risk_note_zh: Optional[str] = None
+    title_en: str = ""
+    summary_en: str = ""
+    bullets_en: list[str] = Field(default_factory=list)
+    risk_note_en: Optional[str] = None
 
 
 def _enrichment_model_id(cfg: Settings) -> str:
@@ -56,13 +60,16 @@ def _call_openrouter_enrich(
         return None
 
     sys_prompt = (
-        "你是面向华语期权交易者的信息流编辑。用户将提供一条 Discord 存档原文。"
+        "你是面向美股期权交易者的双语信息流编辑。用户将提供一条 Discord 存档原文。"
         "请只输出一个 JSON 对象，键为："
         'language_detected（ISO 639-1 如 en/zh，猜不出用 unknown）、'
-        "title_zh（≤40 字中文标题）、summary_zh（2~4 句通俗中文，解释对交易者的含义）、"
-        "bullets_zh（字符串数组，恰好 3 条短句，递进）、"
-        "risk_note_zh（一句风险提示，无可写“信息有限，请交叉验证”）。"
-        "禁止编造具体价格、点位、保证收益；不得输出 JSON 外文字。"
+        "title_zh（≤40 字中文标题）、summary_zh（2~4 句通俗中文）、"
+        "bullets_zh（字符串数组，恰好 3 条短句）、"
+        "risk_note_zh（一句中文风险提示）、"
+        "title_en（≤80 chars English headline）、summary_en（2-4 sentences in English）、"
+        "bullets_en（array of exactly 3 short English bullets）、"
+        "risk_note_en（one English risk disclaimer）。"
+        "中英文语义需一致；禁止编造价格/点位/收益承诺；不得输出 JSON 外文字。"
     )
     user_block = f"作者: {author or 'unknown'}\n\n原文:\n{plaintext[:_MAX_INPUT_CHARS]}"
     payload: dict[str, object] = {
@@ -152,14 +159,20 @@ def process_pending_enrichments(
 
         sess = session_factory()
         try:
-            bullets = [str(b).strip() for b in parsed.bullets_zh if str(b).strip()][:5]
+            bullets_zh = [str(b).strip() for b in parsed.bullets_zh if str(b).strip()][:5]
+            bullets_en = [str(b).strip() for b in parsed.bullets_en if str(b).strip()][:5]
             enr = MessageEnrichmentRow(
                 message_id=row.id,
                 language_detected=parsed.language_detected,
                 title_zh=(parsed.title_zh or "")[:512] or None,
                 summary_zh=parsed.summary_zh or None,
-                bullets_zh=bullets,
+                bullets_zh=bullets_zh,
                 risk_note_zh=(parsed.risk_note_zh or None),
+                title_en=(parsed.title_en or "")[:512] or None,
+                summary_en=parsed.summary_en or None,
+                bullets_en=bullets_en,
+                risk_note_en=(parsed.risk_note_en or None),
+                enrichment_version=2,
                 model=model_id,
             )
             sess.add(enr)

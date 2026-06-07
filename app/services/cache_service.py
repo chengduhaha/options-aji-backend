@@ -162,8 +162,8 @@ def key_treasury_rates() -> str:
 def key_gex(symbol: str) -> str:
     return f"gex:{symbol.upper()}"
 
-def key_ai_market_summary() -> str:
-    return "ai:market_summary"
+def key_ai_market_summary(locale: str = "zh") -> str:
+    return f"ai:market_summary:{locale}"
 
 def key_ai_stock_summary(symbol: str) -> str:
     return f"ai:stock_summary:{symbol.upper()}"

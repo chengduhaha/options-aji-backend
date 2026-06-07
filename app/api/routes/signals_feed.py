@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Optional, cast
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.api.deps import bearer_subscription_optional
+from app.services.locale import Locale, parse_locale
 from app.tools.openbb_tools import OpenBBToolkit, build_default_toolkit
 
 router = APIRouter(tags=["signals"])
@@ -210,7 +211,11 @@ def _vix_macro_card(tk: OpenBBToolkit) -> SignalCard:
 
 
 @router.get("/api/signals/feed")
-def signals_feed(_: Optional[str] = Depends(bearer_subscription_optional)) -> SignalsFeedEnvelope:
+def signals_feed(
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
+    _: Optional[str] = Depends(bearer_subscription_optional),
+) -> SignalsFeedEnvelope:
+    _ = parse_locale(locale)
     toolkit = build_default_toolkit()
 
     equities = ["SPY", "QQQ", "NVDA"]

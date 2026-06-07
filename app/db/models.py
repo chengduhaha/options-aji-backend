@@ -46,6 +46,11 @@ class MessageEnrichmentRow(Base):
     summary_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     bullets_zh: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     risk_note_zh: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    title_en: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    summary_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    bullets_en: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    risk_note_en: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    enrichment_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=True
@@ -315,6 +320,7 @@ class DiscordAuthorProfileRow(Base):
     display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     avatar_filename: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     bio_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    bio_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     twitter_handle: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -653,6 +659,7 @@ class ResonanceSignalRow(Base):
     retail_strength: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     narrative_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    narrative_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

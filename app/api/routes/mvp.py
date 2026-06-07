@@ -31,6 +31,7 @@ from app.services.llm_router import has_llm_provider, post_chat_completions_with
 from app.services.mvp_market_agent import MvpMarketInsightsPayload, generate_mvp_market_insights
 from app.services.mvp_market_context import build_mvp_market_context
 from app.services.discord_menu_authors import resolve_author_filter
+from app.services.locale import Locale, parse_locale, pick_text
 from app.services.mvp_stock_options_agent import (
     StockOptionsInsightRequest,
     StockOptionsInsightsPayload,
@@ -249,6 +250,22 @@ def _fallback_discord_event_analysis(title: str, body: str, tickers: list[str]) 
         "trade_implications_zh": trade,
         "scenario_zh": scenario,
         "risk_watch_zh": risk,
+        "impact_note_en": (
+            "Cross-check SPY/QQQ, VIX, and volume before treating this headline as directional."
+        ),
+        "watch_en": "After the open, watch whether SPY/QQQ confirm with volume before acting.",
+        "deep_dive_en": (
+            "This matters because it can shift risk appetite, rates, or sector flows — not just headlines."
+        ),
+        "trade_implications_en": (
+            "Wait for price near key levels or a confirmed break; use options only with liquid spreads."
+        ),
+        "scenario_en": (
+            "If index and related assets confirm, lean with the move; if price diverges, reduce size."
+        ),
+        "risk_watch_en": (
+            "If VIX rises, spreads widen, or the first 15 minutes reverse, avoid chasing premium."
+        ),
     }
 
 
@@ -562,6 +579,7 @@ def _llm_cache_key(
     hours: int,
     *,
     authors: Optional[list[str]] = None,
+    locale: Locale = "zh",
 ) -> str:
     raw = json.dumps(
         {
@@ -569,12 +587,13 @@ def _llm_cache_key(
             "treasury": treasury,
             "hours": hours,
             "authors": authors or [],
+            "locale": locale,
             "bucket": _five_minute_bucket_utc(),
         },
         ensure_ascii=False,
         sort_keys=True,
     )
-    return f"mvp:war-room:v4:{hash(raw)}"
+    return f"mvp:war-room:v5:{hash(raw)}"
 
 
 def _get_cached_war_room_llm(
@@ -583,9 +602,29 @@ def _get_cached_war_room_llm(
     hours: int,
     *,
     authors: Optional[list[str]] = None,
+    locale: Locale = "zh",
 ) -> dict[str, Any] | None:
-    cached = cache_get(_llm_cache_key(events, treasury, hours, authors=authors))
+    cached = cache_get(_llm_cache_key(events, treasury, hours, authors=authors, locale=locale))
     return cached if isinstance(cached, dict) else None
+
+
+def _localize_war_room_event(ev: dict[str, Any], locale: Locale) -> dict[str, Any]:
+    out = dict(ev)
+    pairs = (
+        ("impact_note_zh", "impact_note_en"),
+        ("watch_zh", "watch_en"),
+        ("deep_dive_zh", "deep_dive_en"),
+        ("trade_implications_zh", "trade_implications_en"),
+        ("scenario_zh", "scenario_en"),
+        ("risk_watch_zh", "risk_watch_en"),
+    )
+    for zh_key, en_key in pairs:
+        out[zh_key] = pick_text(
+            zh=str(ev.get(zh_key) or ""),
+            en=str(ev.get(en_key) or ""),
+            locale=locale,
+        )
+    return out
 
 
 def _call_war_room_llm(
@@ -594,12 +633,13 @@ def _call_war_room_llm(
     hours: int,
     *,
     authors: Optional[list[str]] = None,
+    locale: Locale = "zh",
 ) -> dict[str, Any] | None:
     cfg = get_settings()
     if not has_llm_provider(cfg) or not events:
         return None
-    cache_key = _llm_cache_key(events, treasury, hours, authors=authors)
-    cached = _get_cached_war_room_llm(events, treasury, hours, authors=authors)
+    cache_key = _llm_cache_key(events, treasury, hours, authors=authors, locale=locale)
+    cached = _get_cached_war_room_llm(events, treasury, hours, authors=authors, locale=locale)
     if cached:
         return cached
 
@@ -607,8 +647,15 @@ def _call_war_room_llm(
         "window_hours": hours,
         "discord_events": events[:20],
         "treasury_curve": treasury,
+        "locale": locale,
     }
+    lang_line = (
+        "Write all narrative fields in English."
+        if locale == "en"
+        else "所有解读字段使用中文。"
+    )
     system = (
+        f"{lang_line}\n"
         "你是华语美股盘前作战室分析师，服务对象以 SPY/QQQ/美股指数期权交易者为主。"
         "根据最近 Discord 消息和国债曲线，筛出真正影响今日交易的事件。"
         "不要把 GEX、Put/Call、call wall 这类市场结构指标当成事件。"
@@ -668,20 +715,22 @@ def _call_war_room_llm(
 
 @router.get("/market-insights")
 async def mvp_market_insights(
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
     """DeepAgents 深度推理：市场状态、VIX 曲线、VIX/P/C、国债曲线解读。"""
+    loc = parse_locale(locale)
     try:
         context = build_mvp_market_context()
-        payload = await generate_mvp_market_insights(context)
+        payload = await generate_mvp_market_insights(context, locale=loc)
     except Exception as exc:
         logger.exception("MVP market-insights failed: %s", exc)
         from app.services.mvp_market_agent import _rule_based_insights
 
         try:
-            payload = _rule_based_insights(build_mvp_market_context())
+            payload = _rule_based_insights(build_mvp_market_context(), loc)
         except Exception:
-            payload = _rule_based_insights({})
+            payload = _rule_based_insights({}, loc)
     body = redact_market_insights(payload.model_dump(), entitlement.tier)
     return mvp_envelope(entitlement.tier, body)
 
@@ -739,8 +788,10 @@ def mvp_playbook_hints(
 @router.post("/stock-options-insights")
 async def mvp_stock_options_insights(
     body: StockOptionsInsightRequest,
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
+    _ = parse_locale(locale)
     """阿吉深度洞察：期权合约筛选器 + Expected Move + 与异动/大盘对照。"""
     if entitlement.tier == "guest":
         raise HTTPException(
@@ -773,9 +824,11 @@ def mvp_war_room(
     background_tasks: BackgroundTasks,
     hours: int = Query(default=6, ge=1, le=24),
     menu_slot: str = Query(default="aji_insights"),
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     session: Session = Depends(db_session_dep),
     entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
+    loc = parse_locale(locale)
     author_filter = resolve_author_filter(session, menu_slot)
     try:
         rows = list_discord_feed_rows(
@@ -798,10 +851,10 @@ def mvp_war_room(
         latest_treasury = None
     treasury = _treasury_read(latest_treasury)
     ai = _get_cached_war_room_llm(
-        discord_events, treasury, hours, authors=author_filter
+        discord_events, treasury, hours, authors=author_filter, locale=loc
     )
     war_room_cache_key = _llm_cache_key(
-        discord_events, treasury, hours, authors=author_filter
+        discord_events, treasury, hours, authors=author_filter, locale=loc
     )
     if ai is None and discord_events and _should_schedule_llm(war_room_cache_key):
         background_tasks.add_task(
@@ -810,9 +863,10 @@ def mvp_war_room(
             treasury,
             hours,
             authors=author_filter,
+            locale=loc,
         )
 
-    events = [_normalize_war_room_event(e) for e in discord_events[:8]]
+    events = [_localize_war_room_event(_normalize_war_room_event(e), loc) for e in discord_events[:8]]
     trade_plan = _fallback_plan(events, treasury)
     summary = ""
     if isinstance(ai, dict):
@@ -820,7 +874,7 @@ def mvp_war_room(
         ai_plan = ai.get("trade_plan")
         if isinstance(ai_events, list) and ai_events:
             events = [
-                _normalize_war_room_event(e)
+                _localize_war_room_event(_normalize_war_room_event(e), loc)
                 for e in ai_events
                 if isinstance(e, dict)
             ][:8]
