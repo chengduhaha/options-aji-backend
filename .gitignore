@@ -27,6 +27,8 @@ data/*.db-journal
 data/*.db-shm
 data/*.db-wal
 data/graph_snapshots/*.json
+data/kol_avatars/*
+!data/kol_avatars/.gitkeep
 
 # Local dev: scripts/backend.sh background run
 .backend.pid

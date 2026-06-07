@@ -1,14 +1,29 @@
 """Discord menu author whitelist — admin configure, users read."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps_auth import get_current_admin_user, get_current_user
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
-from app.ingest.message_store import list_discord_feed_rows
+from app.ingest.message_store import StoredDiscordFeedEntry, list_discord_feed_rows
+from app.services.discord_author_profiles import (
+    AvatarValidationError,
+    avatar_file_path,
+    delete_avatar_file,
+    list_admin_author_profiles,
+    list_kol_hub,
+    merge_author_filters,
+    parse_authors_csv,
+    save_avatar_file,
+    upsert_profile_fields,
+)
 from app.services.discord_menu_authors import (
     DISCORD_MENU_SLOT_LABELS,
     KNOWN_DISCORD_MENU_SLOTS,
@@ -54,12 +69,109 @@ class DiscordTimelineItem(BaseModel):
     raw_body: str | None = None
     bullets_zh: list[str] | None = None
     risk_note_zh: str | None = None
+    display_name: str | None = None
+    avatar_url: str | None = None
 
 
 class DiscordTimelineEnvelope(BaseModel):
     generated_at_utc: str
     menu_slot: str
     items: list[DiscordTimelineItem]
+    next_before: str | None = None
+    has_more: bool = False
+
+
+class KolHubItemPayload(BaseModel):
+    author: str
+    display_name: str
+    message_count: int
+    last_seen_utc: str
+    avatar_url: str | None = None
+    bio_zh: str | None = None
+    twitter_handle: str | None = None
+
+
+class KolHubResponse(BaseModel):
+    generated_at_utc: str
+    menu_slot: str
+    items: list[KolHubItemPayload]
+
+
+class AuthorProfilePayload(BaseModel):
+    author: str
+    display_name: str
+    message_count: int
+    last_seen_utc: str
+    avatar_url: str | None = None
+    bio_zh: str | None = None
+    twitter_handle: str | None = None
+
+
+class AuthorProfilesResponse(BaseModel):
+    items: list[AuthorProfilePayload]
+
+
+class AuthorProfileUpdateBody(BaseModel):
+    author: str
+    display_name: str | None = None
+    bio_zh: str | None = None
+    twitter_handle: str | None = None
+
+
+def _cursor_timestamp_iso(value: datetime) -> str:
+    """URL-safe ISO cursor (Z suffix avoids '+' being decoded as space in query strings)."""
+    utc = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return utc.isoformat().replace("+00:00", "Z")
+
+
+def _parse_before_timestamp(raw: str | None) -> datetime | None:
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip().replace("Z", "+00:00")
+    # Query strings decode '+' as space; recover offset if present.
+    if " " in text and "+" not in text:
+        text = text.replace(" ", "+", 1)
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _timeline_item_from_row(
+    r: StoredDiscordFeedEntry,
+    *,
+    display_name: str | None = None,
+    avatar_url: str | None = None,
+) -> DiscordTimelineItem:
+    has_zh = bool(
+        (r.enrichment_title_zh or "").strip()
+        or (r.enrichment_summary_zh or "").strip()
+        or r.enrichment_bullets_zh
+    )
+    if has_zh:
+        title = (r.enrichment_title_zh or "").strip() or (display_name or r.author or "Discord")
+        body = ((r.enrichment_summary_zh or "").strip() or (r.content or "")[:2000])[:4000]
+        bullets = [b for b in r.enrichment_bullets_zh if str(b).strip()] or None
+    else:
+        title = display_name or r.author or "Discord"
+        body = (r.content or "")[:2000]
+        bullets = None
+    return DiscordTimelineItem(
+        id=f"dc-{r.id}",
+        created_at_utc=r.timestamp_utc_iso,
+        title=title,
+        body=body,
+        tickers=list(r.tickers),
+        author=r.author,
+        raw_body=r.content,
+        bullets_zh=bullets,
+        risk_note_zh=(r.enrichment_risk_zh or "").strip() or None,
+        display_name=display_name,
+        avatar_url=avatar_url,
+    )
 
 
 @router.get("/api/admin/discord/authors", response_model=DiscordAuthorsResponse)
@@ -67,8 +179,6 @@ def admin_list_discord_authors(
     session: Session = Depends(db_session_dep),
     _: UserRow = Depends(get_current_admin_user),
 ) -> DiscordAuthorsResponse:
-    from datetime import datetime, timezone
-
     stats = list_distinct_authors(session)
     return DiscordAuthorsResponse(
         authors=[
@@ -80,6 +190,143 @@ def admin_list_discord_authors(
             for s in stats
         ],
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.get("/api/admin/discord/author-profiles", response_model=AuthorProfilesResponse)
+def admin_list_author_profiles(
+    session: Session = Depends(db_session_dep),
+    _: UserRow = Depends(get_current_admin_user),
+) -> AuthorProfilesResponse:
+    rows = list_admin_author_profiles(session)
+    return AuthorProfilesResponse(
+        items=[AuthorProfilePayload(**row) for row in rows],
+    )
+
+
+@router.put("/api/admin/discord/author-profiles", response_model=AuthorProfilePayload)
+def admin_upsert_author_profile(
+    body: AuthorProfileUpdateBody,
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> AuthorProfilePayload:
+    row = upsert_profile_fields(
+        session,
+        author=body.author,
+        display_name=body.display_name,
+        bio_zh=body.bio_zh,
+        twitter_handle=body.twitter_handle,
+        updated_by_user_id=admin.id,
+    )
+    stats = {s.author: s for s in list_distinct_authors(session)}
+    stat = stats.get(row.author)
+    from app.services.discord_author_profiles import avatar_public_url
+
+    return AuthorProfilePayload(
+        author=row.author,
+        display_name=row.display_name or body.author,
+        message_count=stat.message_count if stat else 0,
+        last_seen_utc=stat.last_seen_utc if stat else "",
+        avatar_url=avatar_public_url(row.avatar_filename),
+        bio_zh=row.bio_zh,
+        twitter_handle=row.twitter_handle,
+    )
+
+
+@router.post("/api/admin/discord/author-profiles/avatar", response_model=AuthorProfilePayload)
+async def admin_upload_author_avatar(
+    author: str = Form(...),
+    file: UploadFile = File(...),
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> AuthorProfilePayload:
+    content = await file.read()
+    try:
+        row = save_avatar_file(
+            session,
+            author=author,
+            content=content,
+            content_type=file.content_type or "application/octet-stream",
+            updated_by_user_id=admin.id,
+        )
+    except AvatarValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    stats = {s.author: s for s in list_distinct_authors(session)}
+    stat = stats.get(row.author)
+    from app.services.discord_author_profiles import avatar_public_url
+
+    return AuthorProfilePayload(
+        author=row.author,
+        display_name=row.display_name or author,
+        message_count=stat.message_count if stat else 0,
+        last_seen_utc=stat.last_seen_utc if stat else "",
+        avatar_url=avatar_public_url(row.avatar_filename),
+        bio_zh=row.bio_zh,
+        twitter_handle=row.twitter_handle,
+    )
+
+
+@router.delete("/api/admin/discord/author-profiles/avatar", response_model=AuthorProfilePayload)
+def admin_delete_author_avatar(
+    author: str = Query(...),
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> AuthorProfilePayload:
+    row = delete_avatar_file(session, author=author)
+    stats = {s.author: s for s in list_distinct_authors(session)}
+    stat = stats.get(row.author)
+    from app.services.discord_author_profiles import avatar_public_url
+
+    return AuthorProfilePayload(
+        author=row.author,
+        display_name=row.display_name or author,
+        message_count=stat.message_count if stat else 0,
+        last_seen_utc=stat.last_seen_utc if stat else "",
+        avatar_url=avatar_public_url(row.avatar_filename),
+        bio_zh=row.bio_zh,
+        twitter_handle=row.twitter_handle,
+    )
+
+
+@router.get("/api/discord/avatars/{filename}")
+def serve_kol_avatar(filename: str) -> FileResponse:
+    safe = Path(filename).name
+    if not safe or safe.startswith("."):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="not_found")
+    path = avatar_file_path(safe)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="not_found")
+    media = "image/jpeg"
+    if safe.endswith(".png"):
+        media = "image/png"
+    elif safe.endswith(".webp"):
+        media = "image/webp"
+    return FileResponse(path, media_type=media)
+
+
+@router.get("/api/discord/kol-hub", response_model=KolHubResponse)
+def discord_kol_hub(
+    menu_slot: str = Query(default="twitter_kol"),
+    hours: int = Query(default=168, ge=1, le=24 * 30),
+    session: Session = Depends(db_session_dep),
+) -> KolHubResponse:
+    entries = list_kol_hub(session, menu_slot=menu_slot, hours=hours)
+    return KolHubResponse(
+        generated_at_utc=datetime.now(timezone.utc).isoformat(),
+        menu_slot=menu_slot,
+        items=[
+            KolHubItemPayload(
+                author=e.author,
+                display_name=e.display_name,
+                message_count=e.message_count,
+                last_seen_utc=e.last_seen_utc,
+                avatar_url=e.avatar_url,
+                bio_zh=e.bio_zh,
+                twitter_handle=e.twitter_handle,
+            )
+            for e in entries
+        ],
     )
 
 
@@ -108,50 +355,52 @@ def put_discord_menu_authors(
 def discord_timeline(
     menu_slot: str = Query(default="twitter_kol"),
     hours: int = Query(default=72, ge=1, le=24 * 30),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=30, ge=1, le=200),
     ticker: str | None = Query(default=None),
+    authors: str | None = Query(default=None, description="Comma-separated author filter"),
+    before_timestamp: str | None = Query(default=None),
     session: Session = Depends(db_session_dep),
 ) -> DiscordTimelineEnvelope:
-    from datetime import datetime, timezone
+    menu_authors = resolve_author_filter(session, menu_slot)
+    requested = parse_authors_csv(authors)
+    merged_authors = merge_author_filters(menu_authors, requested)
+    before_dt = _parse_before_timestamp(before_timestamp)
 
-    authors = resolve_author_filter(session, menu_slot)
+    fetch_limit = limit + 1
     rows = list_discord_feed_rows(
         session,
         ticker=ticker,
         hours=hours,
-        limit=limit,
-        authors=authors,
+        limit=fetch_limit,
+        authors=merged_authors,
+        before=before_dt,
     )
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+
+    hub = {e.author: e for e in list_kol_hub(session, menu_slot=menu_slot, hours=hours)}
     items: list[DiscordTimelineItem] = []
-    for r in rows:
-        has_zh = bool(
-            (r.enrichment_title_zh or "").strip()
-            or (r.enrichment_summary_zh or "").strip()
-            or r.enrichment_bullets_zh
-        )
-        if has_zh:
-            title = (r.enrichment_title_zh or "").strip() or (r.author or "Discord")
-            body = ((r.enrichment_summary_zh or "").strip() or (r.content or "")[:2000])[:4000]
-            bullets = [b for b in r.enrichment_bullets_zh if str(b).strip()] or None
-        else:
-            title = r.author or "Discord"
-            body = (r.content or "")[:2000]
-            bullets = None
+    for r in page_rows:
+        meta = hub.get(r.author or "")
         items.append(
-            DiscordTimelineItem(
-                id=f"dc-{r.id}",
-                created_at_utc=r.timestamp_utc_iso,
-                title=title,
-                body=body,
-                tickers=list(r.tickers),
-                author=r.author,
-                raw_body=r.content,
-                bullets_zh=bullets,
-                risk_note_zh=(r.enrichment_risk_zh or "").strip() or None,
+            _timeline_item_from_row(
+                r,
+                display_name=meta.display_name if meta else None,
+                avatar_url=meta.avatar_url if meta else None,
             )
         )
+
+    next_before: str | None = None
+    if has_more and page_rows:
+        last_ts = datetime.fromisoformat(
+            page_rows[-1].timestamp_utc_iso.replace("Z", "+00:00")
+        )
+        next_before = _cursor_timestamp_iso(last_ts)
+
     return DiscordTimelineEnvelope(
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         menu_slot=menu_slot,
         items=items,
+        next_before=next_before,
+        has_more=has_more,
     )

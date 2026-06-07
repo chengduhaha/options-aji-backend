@@ -306,6 +306,22 @@ class DiscordMenuAuthorSettingsRow(Base):
     updated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
 
 
+class DiscordAuthorProfileRow(Base):
+    """Display profile for a Discord/TweetShift author (avatar, bio, handle)."""
+
+    __tablename__ = "discord_author_profiles"
+
+    author: Mapped[str] = mapped_column(String(256), primary_key=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    avatar_filename: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    bio_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    twitter_handle: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    updated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+
 # ─── Supply Chain Graph ───────────────────────────────────────────────────────
 
 class GraphNodeRow(Base):

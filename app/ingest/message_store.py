@@ -17,6 +17,21 @@ from app.db.models import DiscordMessageRow, MessageEnrichmentRow
 logger = logging.getLogger(__name__)
 
 
+def _as_utc_aware(value: dt.datetime) -> dt.datetime:
+    """SQLite returns naive datetimes stored as UTC wall time."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
+def _as_utc_naive(value: dt.datetime) -> dt.datetime:
+    return _as_utc_aware(value).replace(tzinfo=None)
+
+
+def _timestamp_utc_iso(value: dt.datetime) -> str:
+    return _as_utc_aware(value).isoformat()
+
+
 @dataclass(frozen=True)
 class StoredDiscordMessage:
     id: str
@@ -108,7 +123,9 @@ def list_messages_recent(
     limit: int,
     authors: Optional[list[str]] = None,
 ) -> list[StoredDiscordMessage]:
-    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
+    since = _as_utc_naive(
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
+    )
     # Ticker filtering happens client-side below; widen scan so sparse matches still appear.
     fetch_cap = (
         limit
@@ -136,7 +153,7 @@ def list_messages_recent(
             channel_id=r.channel_id,
             author=r.author,
             content=r.content,
-            timestamp_utc_iso=r.timestamp.astimezone(dt.timezone.utc).isoformat(),
+            timestamp_utc_iso=_timestamp_utc_iso(r.timestamp),
             tickers=list(r.tickers or []),
         )
         for r in trimmed
@@ -150,8 +167,11 @@ def list_discord_feed_rows(
     hours: int,
     limit: int,
     authors: Optional[list[str]] = None,
+    before: Optional[dt.datetime] = None,
 ) -> list[StoredDiscordFeedEntry]:
-    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
+    since = _as_utc_naive(
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max(1, hours))
+    )
     fetch_cap = (
         limit
         if ticker is None
@@ -165,6 +185,8 @@ def list_discord_feed_rows(
         )
         .where(DiscordMessageRow.timestamp >= since)
     )
+    if before is not None:
+        stmt = stmt.where(DiscordMessageRow.timestamp < _as_utc_naive(before))
     if authors:
         stmt = stmt.where(DiscordMessageRow.author.in_(authors))
     stmt = stmt.order_by(DiscordMessageRow.timestamp.desc()).limit(
@@ -186,7 +208,7 @@ def list_discord_feed_rows(
                 channel_id=row.channel_id,
                 author=row.author,
                 content=row.content,
-                timestamp_utc_iso=row.timestamp.astimezone(dt.timezone.utc).isoformat(),
+                timestamp_utc_iso=_timestamp_utc_iso(row.timestamp),
                 tickers=list(row.tickers or []),
                 enrichment_title_zh=enr.title_zh if enr else None,
                 enrichment_summary_zh=enr.summary_zh if enr else None,
