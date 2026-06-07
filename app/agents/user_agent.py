@@ -39,6 +39,7 @@ class UserAgentState(TypedDict, total=False):
     discord_context: str
     market_bundle: str
     answer: str
+    locale: str
 
 
 def _safe_json(obj: object) -> str:
@@ -79,7 +80,10 @@ def fetch_market_bundle(state: UserAgentState) -> dict[str, str]:
 
 def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
     cfg = get_settings()
+    locale = state.get("locale") or "zh"
     if not has_llm_provider(cfg):
+        if locale == "en":
+            return {"answer": "The server has no LLM Provider configured, so it cannot call the language model."}
         return {"answer": "服务端未配置 LLM Provider，无法调用语言模型。"}
 
     llm = build_chat_openai(
@@ -94,23 +98,44 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
     question = state.get("question", "").strip()
     ticker = state.get("resolved_ticker") or "SPY"
 
-    base_prompt = (
-        "你是美股期权与市场结构分析师 OptionsAji。必须用中文作答。\n"
-        "参考提供的市场数据和 Discord 存档；不自造成交价。\n"
-        "风险提示：教育是目的，不构成投资建议。\n"
-    )
+    if locale == "en":
+        base_prompt = (
+            "You are OptionsAji, a U.S. options and market structure analyst. "
+            "You must answer in English.\n"
+            "Use the provided market data and Discord archive; do not invent trade prices.\n"
+            "Risk note: this is for education only and is not investment advice.\n"
+        )
+    else:
+        base_prompt = (
+            "你是美股期权与市场结构分析师 OptionsAji。必须用中文作答。\n"
+            "参考提供的市场数据和 Discord 存档；不自造成交价。\n"
+            "风险提示：教育是目的，不构成投资建议。\n"
+        )
 
-    unified_instructions = (
-        "根据用户问题自动调整回答深度，无需用户选择模式：\n"
-        "- 简单事实类（价格、IV、GEX 数值）→ 3-5 句简洁回答\n"
-        "- 分析类（环境评估、趋势、多维度解读）→ 结构化分析：市场环境 / 期权数据 / 风险点\n"
-        "- 策略/情景类（价差、风险收益）→ 结构说明 + 最大盈亏 + Greeks，附教育性免责声明\n\n"
-        "涉及 GEX 关键指标时，可在结尾附 JSON cards block：\n"
-        '```json\n{"cards":{"items":[{"label":"Net GEX","value":"$2.4B","color":"text-green"},{"label":"Gamma Flip","value":"$525","color":"text-foreground"}]}}\n```\n'
-        "涉及期权结构对比时，可附 JSON table block：\n"
-        '```json\n{"table":{"headers":["结构","构成","最大收益","最大亏损","盈亏平衡"],"rows":[["Bull Call Spread","买入 $740C + 卖出 $750C","$10/share","$2.50/share","$742.50"]]}}\n```\n'
-        "始终引用提供的缓存/库内数据，不自造价格；若某字段缺失应明确告知用户。\n"
-    )
+    if locale == "en":
+        unified_instructions = (
+            "Automatically adjust answer depth based on the user's question; there is no user-selected mode:\n"
+            "- Simple factual questions (price, IV, GEX values) -> answer concisely in 3-5 sentences.\n"
+            "- Analysis questions (environment, trend, multi-factor interpretation) -> structure by market setup / options data / key risks.\n"
+            "- Strategy or scenario questions (spreads, risk/reward) -> explain structure, max profit/loss, breakeven, Greeks, and include an educational disclaimer.\n\n"
+            "When discussing key GEX metrics, you may append a JSON cards block:\n"
+            '```json\n{"cards":{"items":[{"label":"Net GEX","value":"$2.4B","color":"text-green"},{"label":"Gamma Flip","value":"$525","color":"text-foreground"}]}}\n```\n'
+            "When comparing options structures, you may append a JSON table block:\n"
+            '```json\n{"table":{"headers":["Structure","Construction","Max Profit","Max Loss","Breakeven"],"rows":[["Bull Call Spread","Buy $740C + sell $750C","$10/share","$2.50/share","$742.50"]]}}\n```\n'
+            "Always cite the provided cached/platform data. Do not invent prices. If a field is missing, say so clearly.\n"
+        )
+    else:
+        unified_instructions = (
+            "根据用户问题自动调整回答深度，无需用户选择模式：\n"
+            "- 简单事实类（价格、IV、GEX 数值）→ 3-5 句简洁回答\n"
+            "- 分析类（环境评估、趋势、多维度解读）→ 结构化分析：市场环境 / 期权数据 / 风险点\n"
+            "- 策略/情景类（价差、风险收益）→ 结构说明 + 最大盈亏 + Greeks，附教育性免责声明\n\n"
+            "涉及 GEX 关键指标时，可在结尾附 JSON cards block：\n"
+            '```json\n{"cards":{"items":[{"label":"Net GEX","value":"$2.4B","color":"text-green"},{"label":"Gamma Flip","value":"$525","color":"text-foreground"}]}}\n```\n'
+            "涉及期权结构对比时，可附 JSON table block：\n"
+            '```json\n{"table":{"headers":["结构","构成","最大收益","最大亏损","盈亏平衡"],"rows":[["Bull Call Spread","买入 $740C + 卖出 $750C","$10/share","$2.50/share","$742.50"]]}}\n```\n'
+            "始终引用提供的缓存/库内数据，不自造价格；若某字段缺失应明确告知用户。\n"
+        )
 
     sys_prompt = base_prompt + unified_instructions
 
@@ -121,20 +146,35 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
         section_ids = select_sections_for_context(mode=playbook_mode)
         playbook_blob = build_playbook_context_blob(section_ids)
     if playbook_blob:
-        sys_prompt += (
-            "\n\n以下为期权内训教材摘录，回答时可引用 DTE、IV Rank、Greeks、Expected Move、异动五步法，"
-            "勿照搬为投资建议：\n"
-            f"{playbook_blob}\n"
-        )
+        if locale == "en":
+            sys_prompt += (
+                "\n\nThe following internal options education excerpts may be referenced for DTE, IV Rank, Greeks, "
+                "Expected Move, and unusual-flow analysis. Do not present them as investment advice:\n"
+                f"{playbook_blob}\n"
+            )
+        else:
+            sys_prompt += (
+                "\n\n以下为期权内训教材摘录，回答时可引用 DTE、IV Rank、Greeks、Expected Move、异动五步法，"
+                "勿照搬为投资建议：\n"
+                f"{playbook_blob}\n"
+            )
 
-    human = HumanMessage(
-        content=(
+    if locale == "en":
+        human_content = (
+            f"User question: {question}\n"
+            f"Primary ticker: {ticker}\n"
+            f"Discord archive:\n{state.get('discord_context', '').strip()}\n"
+            f"Market data JSON:\n{state.get('market_bundle', '{}')}"
+        )
+    else:
+        human_content = (
             f"用户提问：{question}\n"
             f"主要标的代码：{ticker}\n"
             f"Discord存档：\n{state.get('discord_context', '').strip()}\n"
             f"市场数据 JSON：\n{state.get('market_bundle', '{}')}"
-        ),
-    )
+        )
+
+    human = HumanMessage(content=human_content)
 
     try:
         out = llm.invoke([SystemMessage(content=sys_prompt), human])
@@ -142,15 +182,18 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
         return {"answer": "" if text is None else str(text)}
     except Exception as exc:
         logger.exception("LLM synthesize failure: %s", exc)
+        if locale == "en":
+            return {"answer": f"Language model call failed. Please try again later. Details: {type(exc).__name__}"}
         return {"answer": f"调用语言模型失败，请稍后重试。详情：{type(exc).__name__}"}
 
 
 def build_initial_agent_state(
-    *, question: str, ticker: Optional[str]
+    *, question: str, ticker: Optional[str], locale: str = "zh"
 ) -> UserAgentState:
     guard = question.strip()
     ticker_hint = (ticker or "").strip()
-    return {"question": guard, "ticker_hint": ticker_hint}
+    normalized_locale = locale if locale in {"zh", "en"} else "zh"
+    return {"question": guard, "ticker_hint": ticker_hint, "locale": normalized_locale}
 
 
 def execute_user_agent_pipeline(initial: UserAgentState) -> UserAgentState:
@@ -159,7 +202,7 @@ def execute_user_agent_pipeline(initial: UserAgentState) -> UserAgentState:
         return {
             **initial,
             "question": "",
-            "answer": "问题不能为空。",
+            "answer": "Question cannot be empty." if initial.get("locale") == "en" else "问题不能为空。",
             "resolved_ticker": initial.get("ticker_hint", "") or "SPY",
             "discord_context": "",
             "market_bundle": "{}",
@@ -173,7 +216,7 @@ def execute_user_agent_pipeline(initial: UserAgentState) -> UserAgentState:
 
 
 def run_user_agent_once(
-    *, question: str, ticker: Optional[str]
+    *, question: str, ticker: Optional[str], locale: str = "zh"
 ) -> UserAgentState:
-    initial = build_initial_agent_state(question=question, ticker=ticker)
+    initial = build_initial_agent_state(question=question, ticker=ticker, locale=locale)
     return execute_user_agent_pipeline(initial)

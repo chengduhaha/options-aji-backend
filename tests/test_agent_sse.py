@@ -44,9 +44,10 @@ def test_agent_sse_events_include_timestamp(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         agent_route,
         "build_initial_agent_state",
-        lambda question, ticker: {
+        lambda question, ticker, locale="zh": {
             "question": question,
             "ticker_hint": ticker or "",
+            "locale": locale,
         },
     )
     monkeypatch.setattr(
@@ -100,9 +101,10 @@ def test_agent_sse_emits_heartbeat_during_slow_market_fetch(monkeypatch: Any) ->
     monkeypatch.setattr(
         agent_route,
         "build_initial_agent_state",
-        lambda question, ticker: {
+        lambda question, ticker, locale="zh": {
             "question": question,
             "ticker_hint": ticker or "",
+            "locale": locale,
         },
     )
     monkeypatch.setattr(
@@ -140,3 +142,62 @@ def test_agent_sse_emits_heartbeat_during_slow_market_fetch(monkeypatch: Any) ->
         for ev in events
     )
     assert any(ev.get("type") == "answer" and ev.get("content") == "测试回答" for ev in events)
+
+
+def test_agent_sse_english_locale_uses_english_status_and_state(monkeypatch: Any) -> None:
+    captured_initial: dict[str, Any] = {}
+    captured_synthesis_state: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        agent_route,
+        "get_settings",
+        lambda: SimpleNamespace(feature_deep_agent_enabled=True),
+    )
+
+    def fake_initial(question: str, ticker: str | None, locale: str = "zh") -> dict[str, str]:
+        captured_initial.update({"question": question, "ticker": ticker, "locale": locale})
+        return {"question": question, "ticker_hint": ticker or "", "locale": locale}
+
+    monkeypatch.setattr(agent_route, "build_initial_agent_state", fake_initial)
+    monkeypatch.setattr(
+        agent_route,
+        "gather_discord_snapshot",
+        lambda _state: {"resolved_ticker": "SPY", "discord_context": "digest"},
+    )
+    monkeypatch.setattr(
+        agent_route,
+        "build_smart_vs_retail",
+        lambda _symbol: SimpleNamespace(retail_direction="bullish", retail_sentiment_score=72),
+    )
+    monkeypatch.setattr(
+        agent_route,
+        "fetch_market_bundle",
+        lambda _state: {"market_bundle": '{"k":"v"}'},
+    )
+
+    def fake_synthesis(state: dict[str, Any]) -> dict[str, str]:
+        captured_synthesis_state.update(state)
+        return {"answer": "English answer"}
+
+    monkeypatch.setattr(agent_route, "synthesize_llm_answer", fake_synthesis)
+
+    client = _build_client()
+    resp = client.post(
+        "/api/agent/query",
+        json={"question": "Analyze SPY", "ticker": "SPY", "locale": "en"},
+    )
+
+    assert resp.status_code == 200
+    events = _parse_sse_payloads(resp.text)
+
+    assert captured_initial["locale"] == "en"
+    assert captured_synthesis_state["locale"] == "en"
+    assert any(
+        ev.get("type") == "planning" and "Execution plan created" in str(ev.get("content"))
+        for ev in events
+    )
+    assert any(
+        ev.get("type") == "thinking" and "Starting analysis" in str(ev.get("content"))
+        for ev in events
+    )
+    assert any(ev.get("type") == "answer" and ev.get("content") == "English answer" for ev in events)

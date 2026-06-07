@@ -33,6 +33,7 @@ class AgentQueryPayload(BaseModel):
     ticker: Optional[str] = Field(default=None, max_length=12)
     session_id: Optional[str] = Field(default=None, max_length=64)
     mode: Optional[str] = Field(default=None, max_length=16)
+    locale: str = Field(default="zh", pattern="^(zh|en)$")
 
 
 class PlanStep(BaseModel):
@@ -63,6 +64,89 @@ def _build_plan() -> list[PlanStep]:
     ]
 
 
+def _is_english(locale: str | None) -> bool:
+    return locale == "en"
+
+
+def _status_text(locale: str | None, key: str, **values: object) -> str:
+    en = _is_english(locale)
+    templates = {
+        "disabled": "Deep Agent is not enabled yet." if en else "Deep Agent 功能暂未开启。",
+        "planning": (
+            "Execution plan created with {count} steps."
+            if en
+            else "已生成执行计划，共 {count} 步。"
+        ),
+        "start": (
+            "Starting analysis and preparing to load Discord archive context."
+            if en
+            else "开始分析您的问题，并准备载入 Discord 存档上下文。"
+        ),
+        "empty_question": "Question cannot be empty." if en else "问题不能为空。",
+        "sentiment_start": (
+            "sentiment_analyst is processing {symbol} social sentiment."
+            if en
+            else "sentiment_analyst 正在处理 {symbol} 社媒情绪。"
+        ),
+        "sentiment_done": (
+            "sentiment_analyst finished: retail {direction} {score}/100."
+            if en
+            else "sentiment_analyst 完成：散户 {direction} {score}/100。"
+        ),
+        "context_loaded": (
+            "Loaded {count} characters."
+            if en
+            else "已拼接 {count} 字符。"
+        ),
+        "context_empty": (
+            "No matching archive snippets found."
+            if en
+            else "当前无匹配存档片段。"
+        ),
+        "discord_done": (
+            "Stage 1/3: Discord summary complete, focused on {symbol}; {note}"
+            if en
+            else "阶段 1/3：Discord 摘要完成，聚焦标的 {symbol}；{note}"
+        ),
+        "market_start": (
+            "options_flow_analyst is loading {symbol} quotes and options data from cache..."
+            if en
+            else "options_flow_analyst 正在从缓存加载 {symbol} 行情与期权数据…"
+        ),
+        "market_heartbeat": (
+            "options_flow_analyst is still loading {symbol} data from cache. Please wait."
+            if en
+            else "options_flow_analyst 仍在从缓存加载 {symbol} 数据，请稍候。"
+        ),
+        "market_done": (
+            "options_flow_analyst finished: cache snapshot is {count} characters."
+            if en
+            else "options_flow_analyst 完成：缓存数据快照 {count} 字符。"
+        ),
+        "data_fetched": (
+            "Loaded {symbol} data from cache, JSON about {count} characters."
+            if en
+            else "已从缓存加载 {symbol} 数据，JSON 约 {count} 字符。"
+        ),
+        "synthesis_start": (
+            "synthesis_agent is combining Discord, options, and sentiment data."
+            if en
+            else "synthesis_agent 正在综合 Discord、期权、情绪数据。"
+        ),
+        "synthesis_heartbeat": (
+            "synthesis_agent is still combining data and generating the answer. Please wait."
+            if en
+            else "synthesis_agent 仍在综合数据并生成回答，请稍候。"
+        ),
+        "synthesis_done": (
+            "synthesis_agent generated the final answer."
+            if en
+            else "synthesis_agent 已生成最终回答。"
+        ),
+    }
+    return templates[key].format(**values)
+
+
 async def _run_thread_with_heartbeats(
     func: Callable[..., object],
     *args: object,
@@ -84,9 +168,10 @@ async def agent_query_stream(
 ) -> StreamingResponse:
     """SSE 流：`thinking` → `data_fetched` → `answer` → `done`。"""
     cfg = get_settings()
+    locale = body.locale if body.locale in {"zh", "en"} else "zh"
     if not cfg.feature_deep_agent_enabled:
         async def disabled_stream() -> AsyncIterator[bytes]:
-            yield _sse_pack({"type": "answer", "content": "Deep Agent 功能暂未开启。"})
+            yield _sse_pack({"type": "answer", "content": _status_text(locale, "disabled")})
             yield _sse_pack({"type": "done"})
         return StreamingResponse(disabled_stream(), media_type="text/event-stream")
 
@@ -97,23 +182,24 @@ async def agent_query_stream(
         yield _sse_pack(
             _event_payload(
                 "planning",
-                f"已生成执行计划，共 {len(plan_steps)} 步。",
+                _status_text(locale, "planning", count=len(plan_steps)),
                 plan=[step.model_dump() for step in plan_steps],
             ),
         )
         yield _sse_pack(
             _event_payload(
                 "thinking",
-                "开始分析您的问题，并准备载入 Discord 存档上下文。",
+                _status_text(locale, "start"),
             ),
         )
         try:
             initial = build_initial_agent_state(
                 question=body.question,
                 ticker=ticker_str,
+                locale=locale,
             )
             if not initial.get("question", "").strip():
-                yield _sse_pack(_event_payload("error", "问题不能为空。"))
+                yield _sse_pack(_event_payload("error", _status_text(locale, "empty_question")))
                 yield _sse_pack({"type": "done"})
                 return
 
@@ -126,7 +212,7 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_start",
-                    f"sentiment_analyst 正在处理 {sym_g} 社媒情绪。",
+                    _status_text(locale, "sentiment_start", symbol=sym_g),
                     agent="sentiment_analyst",
                 )
             )
@@ -134,26 +220,32 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_done",
-                    (
-                        f"sentiment_analyst 完成：散户 {social_snapshot.retail_direction}"
-                        f" {social_snapshot.retail_sentiment_score}/100。"
+                    _status_text(
+                        locale,
+                        "sentiment_done",
+                        direction=social_snapshot.retail_direction,
+                        score=social_snapshot.retail_sentiment_score,
                     ),
                     agent="sentiment_analyst",
                 )
             )
             ctx = (state.get("discord_context") or "").strip()
-            ctx_note = f"已拼接 {len(ctx)} 字符。" if ctx else "当前无匹配存档片段。"
+            ctx_note = (
+                _status_text(locale, "context_loaded", count=len(ctx))
+                if ctx
+                else _status_text(locale, "context_empty")
+            )
             yield _sse_pack(
                 _event_payload(
                     "thinking",
-                    f"阶段 1/3：Discord 摘要完成，聚焦标的 {sym_g}；{ctx_note}",
+                    _status_text(locale, "discord_done", symbol=sym_g, note=ctx_note),
                 ),
             )
 
             yield _sse_pack(
                 _event_payload(
                     "subagent_start",
-                    f"options_flow_analyst 正在从缓存加载 {sym_g} 行情与期权数据…",
+                    _status_text(locale, "market_start", symbol=sym_g),
                     agent="options_flow_analyst",
                 ),
             )
@@ -162,7 +254,7 @@ async def agent_query_stream(
             async for item_type, item in _run_thread_with_heartbeats(
                 fetch_market_bundle,
                 state,  # type: ignore[arg-type]
-                heartbeat_content=f"options_flow_analyst 仍在从缓存加载 {sym_g} 数据，请稍候。",
+                heartbeat_content=_status_text(locale, "market_heartbeat", symbol=sym_g),
             ):
                 if item_type == "heartbeat":
                     yield _sse_pack(item)  # type: ignore[arg-type]
@@ -178,14 +270,14 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_done",
-                    f"options_flow_analyst 完成：缓存数据快照 {mb_len} 字符。",
+                    _status_text(locale, "market_done", count=mb_len),
                     agent="options_flow_analyst",
                 ),
             )
             yield _sse_pack(
                 _event_payload(
                     "data_fetched",
-                    f"已从缓存加载 {symbol} 数据，JSON 约 {mb_len} 字符。",
+                    _status_text(locale, "data_fetched", symbol=symbol, count=mb_len),
                     resolved_ticker=symbol,
                     session_id=body.session_id,
                 ),
@@ -194,7 +286,7 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_start",
-                    "synthesis_agent 正在综合 Discord、期权、情绪数据。",
+                    _status_text(locale, "synthesis_start"),
                     agent="synthesis_agent",
                 ),
             )
@@ -203,7 +295,7 @@ async def agent_query_stream(
             async for item_type, item in _run_thread_with_heartbeats(
                 synthesize_llm_answer,
                 state,  # type: ignore[arg-type]
-                heartbeat_content="synthesis_agent 仍在综合数据并生成回答，请稍候。",
+                heartbeat_content=_status_text(locale, "synthesis_heartbeat"),
             ):
                 if item_type == "heartbeat":
                     yield _sse_pack(item)  # type: ignore[arg-type]
@@ -218,7 +310,7 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_done",
-                    "synthesis_agent 已生成最终回答。",
+                    _status_text(locale, "synthesis_done"),
                     agent="synthesis_agent",
                 )
             )
