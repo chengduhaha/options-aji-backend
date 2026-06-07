@@ -24,6 +24,12 @@ futu_cache_ttl_seconds = 3
 futu_connect_timeout_seconds = 0.3
 # 盘时每 15 分钟将 Futu 期权链写入 options_snapshots（异动 v2）；需 futu-opend 已登录
 futu_background_options_sync_enabled = true
+# 日 K 线：Futu 数据过期时自动回退 yfinance；设为 false 则完全不用 Futu K 线
+futu_daily_klines_enabled = true
+
+# options_snapshots 表清理（每日 3:30 AM ET）
+options_snapshot_expired_purge_days = 14
+options_snapshot_stale_purge_days = 45
 
 openrouter_api_key = ""
 openrouter_base_url = "https://openrouter.ai/api/v1"

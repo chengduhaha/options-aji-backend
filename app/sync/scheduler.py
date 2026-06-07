@@ -49,6 +49,7 @@ def start_scheduler() -> None:
 
     from app.db.session import SessionLocal
     from app.ingest.message_store import cleanup_retention
+    from app.sync.pipelines.options_snapshot_retention import purge_options_snapshots
 
     def _discord_retention_cleanup() -> None:
         with SessionLocal() as session:
@@ -59,6 +60,15 @@ def start_scheduler() -> None:
         lambda: _run_safe(_discord_retention_cleanup, "discord_retention"),
         IntervalTrigger(hours=1),
         id="discord_retention",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # ── Daily 3:30 AM ET: purge expired/stale options_snapshots ──
+    _scheduler.add_job(
+        lambda: _run_safe(purge_options_snapshots, "options_snapshot_retention"),
+        CronTrigger(hour=3, minute=30, timezone=tz),
+        id="options_snapshot_retention",
         replace_existing=True,
         max_instances=1,
     )

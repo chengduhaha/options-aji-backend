@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     futu_cache_ttl_seconds: int = 3
     futu_connect_timeout_seconds: float = 0.3
     futu_background_options_sync_enabled: bool = False
+    #: When False, daily stock K-lines skip Futu and use yfinance only.
+    futu_daily_klines_enabled: bool = True
 
     # ── OpenRouter LLM ────────────────────────────────────────────────────────
     openrouter_api_key: str = ""
@@ -192,9 +194,14 @@ class Settings(BaseSettings):
     gex_backend_url: str = ""
     gex_backend_headers: str = ""
     #: Discord messages + enrichments kept in PostgreSQL (CASCADE delete).
+    kol_avatars_dir: str = "data/kol_avatars"
     discord_retention_hours: int = 48
     #: Legacy alias; ignored when ``discord_retention_hours`` is set via env.
     retention_days: int = 2
+    #: Delete options_snapshots rows whose expiration_date is older than N calendar days.
+    options_snapshot_expired_purge_days: int = 14
+    #: Delete options_snapshots rows whose snapshot_time is older than N calendar days.
+    options_snapshot_stale_purge_days: int = 45
     agent_discord_context_hours: int = 72
     agent_discord_context_limit: int = 18
     integration_status_public: bool = True

@@ -202,10 +202,14 @@ class FutuQuoteClient:
         try:
             from futu import AuType, KLType, RET_OK
 
-            ret, data, _page = context.request_history_kline(
+            today = date.today()
+            span_days = max(count + 60, 400)
+            start = (today - timedelta(days=span_days)).isoformat()
+            end = today.isoformat()
+            ret, data, page_req = context.request_history_kline(
                 futu_code,
-                start=None,
-                end=None,
+                start=start,
+                end=end,
                 max_count=max(count, 30),
                 ktype=KLType.K_DAY,
                 autype=AuType.QFQ,
@@ -213,7 +217,24 @@ class FutuQuoteClient:
             if ret != RET_OK or data is None or getattr(data, "empty", True):
                 logger.warning("Futu kline empty %s ret=%s", symbol, ret)
                 return None
-            frame = data.copy()
+            frames = [data]
+            while page_req is not None:
+                ret, page_data, page_req = context.request_history_kline(
+                    futu_code,
+                    start=start,
+                    end=end,
+                    max_count=max(count, 30),
+                    ktype=KLType.K_DAY,
+                    autype=AuType.QFQ,
+                    page_req_key=page_req,
+                )
+                if ret != RET_OK or page_data is None or getattr(page_data, "empty", True):
+                    break
+                frames.append(page_data)
+            frame = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0].copy()
+            if "time_key" in frame.columns:
+                frame = frame.drop_duplicates(subset=["time_key"], keep="last")
+                frame = frame.sort_values("time_key")
             rename = {
                 "open": "Open",
                 "high": "High",

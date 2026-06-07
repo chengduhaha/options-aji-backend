@@ -85,29 +85,14 @@ def hv_series_and_current(symbol: str) -> tuple[list[tuple[str, float]], dict[st
     if not guard:
         return [], {"error": "empty_symbol"}
 
-    cfg = get_settings()
-    if getattr(cfg, "futu_enabled", False):
-        try:
-            from app.clients.futu_client import get_futu_client
+    from app.tools.stock_history import fetch_daily_stock_history
 
-            hist = get_futu_client().get_daily_klines(guard, count=280)
-            if hist is not None and not hist.empty:
-                series, meta = hv_series_and_meta_from_hist(hist, guard)
-                meta["historySource"] = "futu"
-                return series, meta
-        except Exception as exc:
-            logger.warning("hv_series futu(%s): %s", guard, exc)
-            return [], {"symbol": guard, "error": "futu_history_failed"}
-
-    try:
-        t = yf.Ticker(guard)
-        hist = t.history(period="1y", interval="1d", auto_adjust=True)
-    except Exception as exc:
-        logger.warning("hv_series(%s): %s", guard, exc)
+    hist, source = fetch_daily_stock_history(guard, count=280)
+    if hist is None or getattr(hist, "empty", True):
         return [], {"symbol": guard, "error": "history_failed"}
 
     series, meta = hv_series_and_meta_from_hist(hist, guard)
-    meta["historySource"] = "yfinance"
+    meta["historySource"] = source
     return series, meta
 
 

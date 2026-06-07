@@ -41,15 +41,10 @@ def _overview_toolkit_block(sym: str) -> tuple[dict[str, object], dict[str, obje
 
 
 def _fetch_history_1y(sym: str) -> object:
-    cfg = get_settings()
-    if getattr(cfg, "futu_enabled", False):
-        hist = get_futu_client().get_daily_klines(sym, count=280)
-        if hist is not None and not getattr(hist, "empty", True):
-            return hist
-        return None
-    from app.tools.yf_helpers import yf_ticker
+    from app.tools.stock_history import fetch_daily_stock_history
 
-    return yf_ticker(sym).history(period="1y", interval="1d", auto_adjust=True)
+    hist, _source = fetch_daily_stock_history(sym, count=280)
+    return hist
 
 
 def _ohlc_from_hist(hist: object) -> list[dict[str, object]]:
