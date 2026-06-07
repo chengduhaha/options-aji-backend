@@ -1,9 +1,10 @@
-"""LangGraph user Q&A workflow v2 — real data context + mode routing."""
+"""User agent Q&A — cache-first data + adaptive single prompt."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -14,24 +15,26 @@ from app.agents.user_agent_helpers import (
     infer_message_filter_symbol,
 )
 from app.config import get_settings
-from app.tools.openbb_tools import build_default_toolkit
-from app.clients.fmp_client import get_fmp_client
-from app.clients.massive_client import get_massive_client
+from app.services.agent_context_service import build_agent_context_from_cache
 from app.services.options_playbook import (
+    AgentModeKind,
     build_fast_summary_blob,
     build_playbook_context_blob,
     select_sections_for_context,
 )
 from app.services.llm_router import build_chat_openai, has_llm_provider
-from app.services.social_sentiment import _fetch_xpoz_sentiment
 
 logger = logging.getLogger(__name__)
+
+_STRATEGY_KEYWORDS = re.compile(
+    r"策略|价差|spread|iron condor|straddle|strangle|风险|盈亏|credit|debit|卖方|买方",
+    re.IGNORECASE,
+)
 
 
 class UserAgentState(TypedDict, total=False):
     question: str
     ticker_hint: str
-    mode: str  # "fast" | "analysis" | "strategy"
     resolved_ticker: str
     discord_context: str
     market_bundle: str
@@ -45,157 +48,12 @@ def _safe_json(obj: object) -> str:
         return "{}"
 
 
-def _fetch_real_data_context(symbol: str) -> dict[str, object]:
-    """Build rich market context from all available data sources."""
-    ctx: dict[str, object] = {"symbol": symbol}
-    tk = build_default_toolkit()
-    cfg = get_settings()
-    bar: dict[str, object] = {}
-
-    # 1. Quote + market bar
-    try:
-        bar = tk.frontend_market_bar(symbol)
-        if bar:
-            ctx["market_bar"] = bar
-    except Exception:
-        pass
-
-    # 2. GEX profile
-    try:
-        gex = tk.get_gex(symbol)
-        if gex and isinstance(gex, dict) and not gex.get("error"):
-            ctx["gex"] = {
-                "netGex_bn": gex.get("netGex"),
-                "regime": gex.get("regime"),
-                "gammaFlip": gex.get("gammaFlip"),
-                "maxPain": gex.get("maxPain"),
-                "callWall": gex.get("callWall"),
-                "putWall": gex.get("putWall"),
-                "strikes_count": len(gex.get("strikes", [])),
-                "underlyingPrice": gex.get("underlyingPrice"),
-            }
-    except Exception:
-        pass
-
-    # 3. Option chain (front expiry)
-    try:
-        chain = tk.get_option_chain_full(symbol)
-        if chain and isinstance(chain, dict):
-            calls = chain.get("calls", [])
-            puts = chain.get("puts", [])
-            if isinstance(calls, list) and isinstance(puts, list):
-                atm = None
-                spot = bar.get("spot") or bar.get("price") or 0
-                if spot:
-                    all_contracts = []
-                    for c in calls:
-                        if isinstance(c, dict):
-                            c["type"] = "call"
-                            all_contracts.append(c)
-                    for p in puts:
-                        if isinstance(p, dict):
-                            p["type"] = "put"
-                            all_contracts.append(p)
-                    if all_contracts:
-                        all_contracts.sort(key=lambda x: abs(float(x.get("strike", 0) or 0) - float(spot)))
-                        atm_contracts = all_contracts[:6]
-                        ctx["atm_options"] = [
-                            {
-                                "type": c.get("type"),
-                                "strike": c.get("strike"),
-                                "bid": c.get("bid"),
-                                "ask": c.get("ask"),
-                                "iv": c.get("impliedVolatility"),
-                                "delta": c.get("delta"),
-                                "gamma": c.get("gamma"),
-                                "theta": c.get("theta"),
-                                "vega": c.get("vega"),
-                                "oi": c.get("openInterest"),
-                                "volume": c.get("day_volume"),
-                            }
-                            for c in atm_contracts
-                        ]
-                expiry = chain.get("expiration")
-                if expiry:
-                    ctx["front_expiry"] = str(expiry)
-    except Exception:
-        pass
-
-    # 4. Analyst ratings + price target
-    if cfg.fmp_api_key:
-        try:
-            fmp = get_fmp_client()
-            pt = fmp.get_price_target_summary(symbol)
-            if pt:
-                ctx["price_target"] = {
-                    "lastMonthAvg": pt.get("lastMonthAvgPriceTarget"),
-                    "lastMonthCount": pt.get("lastMonthCount"),
-                    "allTimeAvg": pt.get("allTimeAvgPriceTarget"),
-                }
-            ratings = fmp.get_analyst_ratings(symbol)
-            if ratings and isinstance(ratings, list):
-                recent = ratings[:5]
-                ctx["recent_ratings"] = [
-                    {"firm": r.get("gradingCompany"), "action": r.get("action"),
-                     "to": r.get("newGrade"), "from": r.get("previousGrade"),
-                     "target": r.get("priceTarget"), "date": r.get("date")}
-                    for r in recent if isinstance(r, dict)
-                ]
-        except Exception:
-            pass
-
-        try:
-            fmp = get_fmp_client()
-            insider = fmp.get_insider_trades(symbol)
-            if isinstance(insider, list) and insider:
-                ctx["insider_trades"] = insider[:10]
-        except Exception:
-            pass
-
-        try:
-            fmp = get_fmp_client()
-            income = fmp.get_income_statement(symbol)
-            balance = fmp.get_balance_sheet(symbol)
-            financials: dict[str, object] = {}
-            if isinstance(income, list) and income:
-                financials["income_statement"] = income[:4]
-            if isinstance(balance, list) and balance:
-                financials["balance_sheet"] = balance[:4]
-            if financials:
-                ctx["financials"] = financials
-        except Exception:
-            pass
-
-    # 5. Social sentiment from xpoz
-    try:
-        social = _fetch_xpoz_sentiment(symbol)
-        if social is not None:
-            if hasattr(social, "model_dump"):
-                ctx["social_sentiment"] = social.model_dump()
-            else:
-                ctx["social_sentiment"] = social
-    except Exception:
-        pass
-
-    # 6. Massive option chain depth snapshot
-    if getattr(cfg, "massive_api_key", "").strip():
-        try:
-            contracts = get_massive_client().get_option_chain_snapshot(symbol)
-            if isinstance(contracts, list) and contracts:
-                ctx["massive_option_chain_depth"] = {
-                    "contracts_count": len(contracts),
-                    "sample": contracts[:20],
-                }
-        except Exception:
-            pass
-
-    # 7. Earnings context
-    try:
-        ctx["earnings"] = tk.snapshot_bundle(symbol).get("earnings")
-    except Exception:
-        pass
-
-    return ctx
+def _playbook_mode_for_question(question: str) -> AgentModeKind:
+    if _STRATEGY_KEYWORDS.search(question):
+        return "strategy"
+    if len(question.strip()) > 80:
+        return "analysis"
+    return "fast"
 
 
 def gather_discord_snapshot(state: UserAgentState) -> dict[str, str]:
@@ -215,8 +73,7 @@ def fetch_market_bundle(state: UserAgentState) -> dict[str, str]:
     if not guard_q:
         return {"market_bundle": "{}"}
     ticker = state.get("resolved_ticker") or "SPY"
-    # Use rich real-data context instead of yfinance-only snapshot
-    bundle = _fetch_real_data_context(ticker)
+    bundle = build_agent_context_from_cache(ticker)
     return {"market_bundle": _safe_json(bundle)}
 
 
@@ -234,7 +91,7 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
         max_retries=2,
     )
 
-    mode = state.get("mode", "fast")
+    question = state.get("question", "").strip()
     ticker = state.get("resolved_ticker") or "SPY"
 
     base_prompt = (
@@ -243,43 +100,25 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
         "风险提示：教育是目的，不构成投资建议。\n"
     )
 
-    mode_instructions = {
-        "fast": (
-            "模式：快速问答。\n"
-            "用 3-5 句话直接回答用户问题，聚焦关键数据点。\n"
-            "适合快速了解行情、GEX 环境、IV 水平等。\n"
-        ),
-        "analysis": (
-            "模式：深度分析。\n"
-            "对用户问题进行深入的结构化分析，包含：\n"
-            "1. 市场环境（价格、波动率、GEX 画像）\n"
-            "2. 期权数据解读（IV 期限结构、Skew、持仓分布）\n"
-            "3. 关键风险点\n"
-            "4. 多时间维度视角\n"
-            "在回复结尾如果涉及 GEX 数据，追加一个 JSON block 格式如下：\n"
-            '```json\n{"cards":{"items":[{"label":"Net GEX","value":"$2.4B","color":"text-green"},{"label":"Gamma Flip","value":"$525","color":"text-foreground"},{"label":"Call Wall","value":"$560","color":"text-foreground"},{"label":"Put Wall","value":"$540","color":"text-foreground"}]}}\n```\n'
-            "使用数据支撑结论，标注关键数值。\n"
-        ),
-        "strategy": (
-            "模式：风险情景拆解（仅教育与研究用途，不构成投资建议）。\n"
-            "根据用户的情景假设（上涨/下跌/中性）和期限偏好，拆解可对照的期权结构（仅作教育说明，不构成操作建议）：\n"
-            "1. 结构名称与构成方式（涉及哪些合约）\n"
-            "2. 最大收益 / 最大亏损 / 盈亏平衡点\n"
-            "3. Greeks 暴露分析\n"
-            "4. 隐含概率参考\n"
-            "在回复结尾追加一个 JSON block 格式如下：\n"
-            '```json\n{"table":{"headers":["结构","构成","最大收益","最大亏损","盈亏平衡"],"rows":[["Bull Call Spread","买入 $740C + 卖出 $750C","$10/share","$2.50/share","$742.50"]]}}\n```\n'
-            "给出 1-2 个备选结构用于情景对照。\n"
-        ),
-    }
+    unified_instructions = (
+        "根据用户问题自动调整回答深度，无需用户选择模式：\n"
+        "- 简单事实类（价格、IV、GEX 数值）→ 3-5 句简洁回答\n"
+        "- 分析类（环境评估、趋势、多维度解读）→ 结构化分析：市场环境 / 期权数据 / 风险点\n"
+        "- 策略/情景类（价差、风险收益）→ 结构说明 + 最大盈亏 + Greeks，附教育性免责声明\n\n"
+        "涉及 GEX 关键指标时，可在结尾附 JSON cards block：\n"
+        '```json\n{"cards":{"items":[{"label":"Net GEX","value":"$2.4B","color":"text-green"},{"label":"Gamma Flip","value":"$525","color":"text-foreground"}]}}\n```\n'
+        "涉及期权结构对比时，可附 JSON table block：\n"
+        '```json\n{"table":{"headers":["结构","构成","最大收益","最大亏损","盈亏平衡"],"rows":[["Bull Call Spread","买入 $740C + 卖出 $750C","$10/share","$2.50/share","$742.50"]]}}\n```\n'
+        "始终引用提供的缓存/库内数据，不自造价格；若某字段缺失应明确告知用户。\n"
+    )
 
-    sys_prompt = base_prompt + mode_instructions.get(mode, mode_instructions["fast"])
+    sys_prompt = base_prompt + unified_instructions
 
-    if mode == "fast":
+    playbook_mode = _playbook_mode_for_question(question)
+    if playbook_mode == "fast":
         playbook_blob = build_fast_summary_blob()
     else:
-        agent_mode = "strategy" if mode == "strategy" else "analysis"
-        section_ids = select_sections_for_context(mode=agent_mode)
+        section_ids = select_sections_for_context(mode=playbook_mode)
         playbook_blob = build_playbook_context_blob(section_ids)
     if playbook_blob:
         sys_prompt += (
@@ -290,9 +129,8 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
 
     human = HumanMessage(
         content=(
-            f"用户提问：{state.get('question', '')}\n"
+            f"用户提问：{question}\n"
             f"主要标的代码：{ticker}\n"
-            f"模式：{mode}\n"
             f"Discord存档：\n{state.get('discord_context', '').strip()}\n"
             f"市场数据 JSON：\n{state.get('market_bundle', '{}')}"
         ),
@@ -308,11 +146,11 @@ def synthesize_llm_answer(state: UserAgentState) -> dict[str, str]:
 
 
 def build_initial_agent_state(
-    *, question: str, ticker: Optional[str], mode: str = "fast"
+    *, question: str, ticker: Optional[str]
 ) -> UserAgentState:
     guard = question.strip()
     ticker_hint = (ticker or "").strip()
-    return {"question": guard, "ticker_hint": ticker_hint, "mode": mode}
+    return {"question": guard, "ticker_hint": ticker_hint}
 
 
 def execute_user_agent_pipeline(initial: UserAgentState) -> UserAgentState:
@@ -335,7 +173,7 @@ def execute_user_agent_pipeline(initial: UserAgentState) -> UserAgentState:
 
 
 def run_user_agent_once(
-    *, question: str, ticker: Optional[str], mode: str = "fast"
+    *, question: str, ticker: Optional[str]
 ) -> UserAgentState:
-    initial = build_initial_agent_state(question=question, ticker=ticker, mode=mode)
+    initial = build_initial_agent_state(question=question, ticker=ticker)
     return execute_user_agent_pipeline(initial)

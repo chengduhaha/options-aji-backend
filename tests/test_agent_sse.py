@@ -44,10 +44,9 @@ def test_agent_sse_events_include_timestamp(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         agent_route,
         "build_initial_agent_state",
-        lambda question, ticker, mode: {
+        lambda question, ticker: {
             "question": question,
             "ticker_hint": ticker or "",
-            "mode": mode,
         },
     )
     monkeypatch.setattr(
@@ -74,12 +73,11 @@ def test_agent_sse_events_include_timestamp(monkeypatch: Any) -> None:
     client = _build_client()
     resp = client.post(
         "/api/agent/query",
-        json={"question": "分析SPY", "ticker": "SPY", "mode": "analysis"},
+        json={"question": "分析SPY", "ticker": "SPY"},
     )
     assert resp.status_code == 200
     events = _parse_sse_payloads(resp.text)
     assert len(events) >= 5
-    # All non-terminal events should include ts_unix_ms
     for ev in events:
         if ev.get("type") in {"done", "answer"}:
             continue
@@ -102,10 +100,9 @@ def test_agent_sse_emits_heartbeat_during_slow_market_fetch(monkeypatch: Any) ->
     monkeypatch.setattr(
         agent_route,
         "build_initial_agent_state",
-        lambda question, ticker, mode: {
+        lambda question, ticker: {
             "question": question,
             "ticker_hint": ticker or "",
-            "mode": mode,
         },
     )
     monkeypatch.setattr(
@@ -133,13 +130,13 @@ def test_agent_sse_emits_heartbeat_during_slow_market_fetch(monkeypatch: Any) ->
     client = _build_client()
     resp = client.post(
         "/api/agent/query",
-        json={"question": "分析SPY", "ticker": "SPY", "mode": "analysis"},
+        json={"question": "分析SPY", "ticker": "SPY"},
     )
     assert resp.status_code == 200
     events = _parse_sse_payloads(resp.text)
 
     assert any(
-        ev.get("type") == "thinking" and "options_flow_analyst 仍在拉取" in str(ev.get("content"))
+        ev.get("type") == "thinking" and "options_flow_analyst 仍在从缓存加载" in str(ev.get("content"))
         for ev in events
     )
     assert any(ev.get("type") == "answer" and ev.get("content") == "测试回答" for ev in events)

@@ -32,7 +32,7 @@ class AgentQueryPayload(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     ticker: Optional[str] = Field(default=None, max_length=12)
     session_id: Optional[str] = Field(default=None, max_length=64)
-    mode: str = Field(default="fast", pattern="^(fast|analysis|strategy)$")
+    mode: Optional[str] = Field(default=None, max_length=16)
 
 
 class PlanStep(BaseModel):
@@ -55,15 +55,12 @@ def _event_payload(kind: str, content: str, **extras: object) -> dict[str, objec
     return payload
 
 
-def _build_plan(mode: str) -> list[PlanStep]:
-    base = [
+def _build_plan() -> list[PlanStep]:
+    return [
         PlanStep(id="sentiment", title="读取社媒情绪与共振快照", owner="sentiment_analyst"),
-        PlanStep(id="market", title="拉取行情、期权链与 GEX", owner="options_flow_analyst"),
+        PlanStep(id="market", title="从缓存加载行情、期权链与 GEX", owner="options_flow_analyst"),
         PlanStep(id="synthesis", title="综合结论并生成回答", owner="synthesis_agent"),
     ]
-    if mode == "strategy":
-        return base + [PlanStep(id="risk", title="评估策略风险收益比", owner="strategy_agent")]
-    return base
 
 
 async def _run_thread_with_heartbeats(
@@ -96,8 +93,7 @@ async def agent_query_stream(
     ticker_str = None if body.ticker is None else body.ticker.upper()
 
     async def gen_bytes() -> AsyncIterator[bytes]:
-        mode_label = {"fast": "快速问答", "analysis": "深度分析", "strategy": "策略评估"}.get(body.mode, "快速问答")
-        plan_steps = _build_plan(body.mode)
+        plan_steps = _build_plan()
         yield _sse_pack(
             _event_payload(
                 "planning",
@@ -108,14 +104,13 @@ async def agent_query_stream(
         yield _sse_pack(
             _event_payload(
                 "thinking",
-                f"开始处理（{mode_label}模式）：解析提问与标的提示，并准备载入 Discord 存档上下文。",
+                "开始分析您的问题，并准备载入 Discord 存档上下文。",
             ),
         )
         try:
             initial = build_initial_agent_state(
                 question=body.question,
                 ticker=ticker_str,
-                mode=body.mode,
             )
             if not initial.get("question", "").strip():
                 yield _sse_pack(_event_payload("error", "问题不能为空。"))
@@ -158,7 +153,7 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_start",
-                    f"options_flow_analyst 正在拉取 {sym_g} 行情与期权数据…",
+                    f"options_flow_analyst 正在从缓存加载 {sym_g} 行情与期权数据…",
                     agent="options_flow_analyst",
                 ),
             )
@@ -167,7 +162,7 @@ async def agent_query_stream(
             async for item_type, item in _run_thread_with_heartbeats(
                 fetch_market_bundle,
                 state,  # type: ignore[arg-type]
-                heartbeat_content=f"options_flow_analyst 仍在拉取 {sym_g} 行情与期权数据，请稍候。",
+                heartbeat_content=f"options_flow_analyst 仍在从缓存加载 {sym_g} 数据，请稍候。",
             ):
                 if item_type == "heartbeat":
                     yield _sse_pack(item)  # type: ignore[arg-type]
@@ -183,14 +178,14 @@ async def agent_query_stream(
             yield _sse_pack(
                 _event_payload(
                     "subagent_done",
-                    f"options_flow_analyst 完成：市场数据快照 {mb_len} 字符。",
+                    f"options_flow_analyst 完成：缓存数据快照 {mb_len} 字符。",
                     agent="options_flow_analyst",
                 ),
             )
             yield _sse_pack(
                 _event_payload(
                     "data_fetched",
-                    f"市场数据快照已就绪（{symbol}），JSON 约 {mb_len} 字符。",
+                    f"已从缓存加载 {symbol} 数据，JSON 约 {mb_len} 字符。",
                     resolved_ticker=symbol,
                     session_id=body.session_id,
                 ),
