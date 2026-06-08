@@ -66,7 +66,11 @@ def merge_settings_update(
     return out
 
 
-def list_distinct_authors(session: Session) -> list[DiscordAuthorStat]:
+def list_distinct_authors(
+    session: Session,
+    *,
+    authors: Optional[list[str]] = None,
+) -> list[DiscordAuthorStat]:
     stmt = (
         select(
             DiscordMessageRow.author,
@@ -75,9 +79,12 @@ def list_distinct_authors(session: Session) -> list[DiscordAuthorStat]:
         )
         .where(DiscordMessageRow.author.isnot(None))
         .where(DiscordMessageRow.author != "")
-        .group_by(DiscordMessageRow.author)
-        .order_by(func.max(DiscordMessageRow.timestamp).desc())
     )
+    if authors:
+        cleaned = [a.strip() for a in authors if a and str(a).strip()]
+        if cleaned:
+            stmt = stmt.where(DiscordMessageRow.author.in_(cleaned))
+    stmt = stmt.group_by(DiscordMessageRow.author).order_by(func.max(DiscordMessageRow.timestamp).desc())
     rows = session.execute(stmt).all()
     out: list[DiscordAuthorStat] = []
     for author, cnt, last_seen in rows:

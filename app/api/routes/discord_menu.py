@@ -187,7 +187,7 @@ def _timeline_item_from_row(
         body=body,
         tickers=list(r.tickers),
         author=r.author,
-        raw_body=r.content,
+        raw_body=None,
         bullets=bullets,
         bullets_zh=bullets_zh or None,
         bullets_en=bullets_en or None,
@@ -427,15 +427,13 @@ def discord_timeline(
 
     hub_cache_key = f"discord:kol-hub:v1:{menu_slot}:{hours}:{loc}"
     hub_cached = cache_get(hub_cache_key)
+    hub: dict[str, object] = {}
     if isinstance(hub_cached, dict) and isinstance(hub_cached.get("items"), list):
         hub = {
             str(item.get("author")): item
             for item in hub_cached["items"]
             if isinstance(item, dict) and item.get("author")
         }
-    else:
-        hub_entries = list_kol_hub(session, menu_slot=menu_slot, hours=hours)
-        hub = {e.author: e for e in hub_entries}
 
     items: list[DiscordTimelineItem] = []
     for r in page_rows:

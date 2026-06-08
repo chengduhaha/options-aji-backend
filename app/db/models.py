@@ -20,7 +20,10 @@ class Base(DeclarativeBase):
 
 class DiscordMessageRow(Base):
     __tablename__ = "discord_messages"
-    __table_args__ = (Index("idx_discord_messages_timestamp", "timestamp"),)
+    __table_args__ = (
+        Index("idx_discord_messages_timestamp", "timestamp"),
+        Index("idx_discord_messages_author_timestamp", "author", "timestamp"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     channel_id: Mapped[str] = mapped_column(String(32), nullable=False)

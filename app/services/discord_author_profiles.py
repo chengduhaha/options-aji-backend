@@ -176,12 +176,10 @@ def _profile_map(session: Session, authors: list[str]) -> dict[str, DiscordAutho
 
 def list_kol_hub(session: Session, *, menu_slot: str, hours: int) -> list[KolHubEntry]:
     menu_authors = resolve_author_filter(session, menu_slot)
-    all_stats = list_distinct_authors(session)
     if menu_authors is not None:
-        allowed = set(menu_authors)
-        stats = [s for s in all_stats if s.author in allowed]
+        stats = list_distinct_authors(session, authors=menu_authors)
     else:
-        stats = list(all_stats)
+        stats = list_distinct_authors(session)
 
     profiles = _profile_map(session, [s.author for s in stats])
     out: list[KolHubEntry] = []
