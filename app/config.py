@@ -152,6 +152,8 @@ class Settings(BaseSettings):
     auth_verification_code_ttl_seconds: int = 900
     auth_verification_max_attempts: int = 5
     auth_verification_debug_expose_code: bool = False
+    turnstile_enabled: bool = False
+    turnstile_secret_key: str = ""
 
     # ── MVP tiered access (guest / trial / pro) ───────────────────────────────
     mvp_trial_enabled: bool = True

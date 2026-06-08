@@ -7,6 +7,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import select
@@ -30,6 +31,8 @@ from app.services.passwords import hash_password, verify_password
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
 
 def _norm_email(email: str) -> str:
@@ -78,11 +81,13 @@ class RegisterBody(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     display_name: Optional[str] = Field(default=None, max_length=128)
+    turnstile_token: Optional[str] = Field(default=None, max_length=4096)
 
 
 class LoginBody(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+    turnstile_token: Optional[str] = Field(default=None, max_length=4096)
 
 
 class UserPublic(BaseModel):
@@ -312,6 +317,75 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _verify_turnstile_or_raise(
+    *,
+    settings: Settings,
+    token: Optional[str],
+    ip: str,
+    action: str,
+) -> None:
+    if not settings.turnstile_enabled:
+        return
+
+    token = (token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "turnstile_required", "message": "请先完成人机验证。"},
+        )
+
+    secret = settings.turnstile_secret_key.strip()
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "turnstile_not_configured", "message": "人机验证服务未配置。"},
+        )
+
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.post(
+                TURNSTILE_VERIFY_URL,
+                data={
+                    "secret": secret,
+                    "response": token,
+                    "remoteip": ip,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Turnstile verification request failed action=%s ip=%s error=%s", action, ip, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "turnstile_unavailable", "message": "人机验证服务暂不可用，请稍后再试。"},
+        ) from exc
+
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        logger.info(
+            "Turnstile verification failed action=%s ip=%s error_codes=%s",
+            action,
+            ip,
+            payload.get("error-codes") if isinstance(payload, dict) else None,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "turnstile_failed", "message": "人机验证失败，请重试。"},
+        )
+
+    returned_action = str(payload.get("action") or "").strip()
+    if returned_action and returned_action != action:
+        logger.warning(
+            "Turnstile action mismatch expected=%s got=%s ip=%s",
+            action,
+            returned_action,
+            ip,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "turnstile_failed", "message": "人机验证失败，请重试。"},
+        )
+
+
 @router.post("/register", response_model=RegisterResponse)
 async def register(
     body: RegisterBody,
@@ -320,6 +394,7 @@ async def register(
 ) -> RegisterResponse:
     settings = get_settings()
     ip = _client_ip(request)
+    _verify_turnstile_or_raise(settings=settings, token=body.turnstile_token, ip=ip, action="register")
     if register_rate_limited(ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -528,8 +603,13 @@ async def register_verify(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     body: LoginBody,
+    request: Request,
     session: Session = Depends(db_session_dep),
 ) -> TokenResponse:
+    settings = get_settings()
+    ip = _client_ip(request)
+    _verify_turnstile_or_raise(settings=settings, token=body.turnstile_token, ip=ip, action="login")
+
     email = _norm_email(str(body.email))
     if is_login_locked(email):
         raise HTTPException(

@@ -57,6 +57,23 @@ def _apply_auth_test_patches(monkeypatch) -> None:
             auth_verification_code_ttl_seconds=900,
             auth_verification_max_attempts=5,
             auth_verification_debug_expose_code=True,
+            turnstile_enabled=False,
+            turnstile_secret_key="",
+        ),
+    )
+
+
+def _apply_turnstile_required_settings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth_route,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auth_admin_emails="",
+            auth_verification_code_ttl_seconds=900,
+            auth_verification_max_attempts=5,
+            auth_verification_debug_expose_code=True,
+            turnstile_enabled=True,
+            turnstile_secret_key="test-secret",
         ),
     )
 
@@ -107,6 +124,143 @@ def test_register_verify_login_roundtrip(monkeypatch) -> None:
     login_json = login_resp.json()
     assert login_json["access_token"]
     assert login_json["user"]["email"] == "auth-flow@example.com"
+
+
+def test_register_requires_turnstile_token_when_enabled(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    _apply_turnstile_required_settings(monkeypatch)
+    client = _build_client()
+
+    register_resp = client.post(
+        "/api/auth/register",
+        json={"email": "captcha-register@example.com", "password": "Passw0rd1"},
+    )
+
+    assert register_resp.status_code == 400
+    assert register_resp.json()["detail"]["code"] == "turnstile_required"
+
+
+def test_login_requires_turnstile_token_when_enabled(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    _apply_turnstile_required_settings(monkeypatch)
+    client = _build_client()
+
+    with client as test_client:
+        app = test_client.app
+        override_db = app.dependency_overrides[db_session_dep]
+        session_gen = override_db()
+        session = next(session_gen)
+        try:
+            row = UserRow(
+                email="captcha-login@example.com",
+                password_hash=hash_password("Passw0rd1"),
+                role="user",
+                email_verified=True,
+            )
+            session.add(row)
+            session.commit()
+        finally:
+            session.close()
+            try:
+                next(session_gen)
+            except StopIteration:
+                pass
+
+    login_resp = client.post(
+        "/api/auth/login",
+        json={"email": "captcha-login@example.com", "password": "Passw0rd1"},
+    )
+
+    assert login_resp.status_code == 400
+    assert login_resp.json()["detail"]["code"] == "turnstile_required"
+
+
+def test_register_accepts_valid_turnstile_token_when_enabled(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    _apply_turnstile_required_settings(monkeypatch)
+    posted: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"success": True, "action": "register"}
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, data: dict[str, str]) -> FakeResponse:
+            posted["url"] = url
+            posted["data"] = data
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_route.httpx, "Client", FakeClient)
+    client = _build_client()
+
+    register_resp = client.post(
+        "/api/auth/register",
+        json={
+            "email": "captcha-ok@example.com",
+            "password": "Passw0rd1",
+            "turnstile_token": "valid-token",
+        },
+    )
+
+    assert register_resp.status_code == 200
+    assert register_resp.json()["user"]["email"] == "captcha-ok@example.com"
+    assert posted["data"] == {
+        "secret": "test-secret",
+        "response": "valid-token",
+        "remoteip": "testclient",
+    }
+
+
+def test_login_rejects_failed_turnstile_token_when_enabled(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    _apply_turnstile_required_settings(monkeypatch)
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"success": False, "error-codes": ["invalid-input-response"]}
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, data: dict[str, str]) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_route.httpx, "Client", FakeClient)
+    client = _build_client()
+
+    login_resp = client.post(
+        "/api/auth/login",
+        json={
+            "email": "captcha-fail@example.com",
+            "password": "Passw0rd1",
+            "turnstile_token": "bad-token",
+        },
+    )
+
+    assert login_resp.status_code == 403
+    assert login_resp.json()["detail"]["code"] == "turnstile_failed"
 
 
 def test_legacy_unverified_user_can_still_login_without_pending_verification(monkeypatch) -> None:
