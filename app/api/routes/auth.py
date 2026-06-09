@@ -137,6 +137,7 @@ class RegisterVerifyBody(BaseModel):
 
 class ResendVerificationBody(BaseModel):
     email: EmailStr
+    turnstile_token: Optional[str] = Field(default=None, max_length=4096)
 
 
 class ResendVerificationResponse(BaseModel):
@@ -483,6 +484,7 @@ async def register_resend(
 ) -> ResendVerificationResponse:
     settings = get_settings()
     ip = _client_ip(request)
+    _verify_turnstile_or_raise(settings=settings, token=body.turnstile_token, ip=ip, action="resend")
     if register_rate_limited(ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

@@ -263,6 +263,78 @@ def test_login_rejects_failed_turnstile_token_when_enabled(monkeypatch) -> None:
     assert login_resp.json()["detail"]["code"] == "turnstile_failed"
 
 
+def test_resend_verification_requires_turnstile_token_when_enabled(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    client = _build_client()
+
+    register_resp = client.post(
+        "/api/auth/register",
+        json={"email": "resend-captcha@example.com", "password": "Passw0rd1"},
+    )
+    assert register_resp.status_code == 200
+
+    _apply_turnstile_required_settings(monkeypatch)
+    resend_resp = client.post(
+        "/api/auth/register/resend",
+        json={"email": "resend-captcha@example.com"},
+    )
+
+    assert resend_resp.status_code == 400
+    assert resend_resp.json()["detail"]["code"] == "turnstile_required"
+
+
+def test_resend_verification_accepts_valid_turnstile_token_when_enabled(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    client = _build_client()
+
+    register_resp = client.post(
+        "/api/auth/register",
+        json={"email": "resend-captcha-ok@example.com", "password": "Passw0rd1"},
+    )
+    assert register_resp.status_code == 200
+    first_code = str(register_resp.json()["verification_code"])
+
+    _apply_turnstile_required_settings(monkeypatch)
+    posted: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"success": True, "action": "resend"}
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, data: dict[str, str]) -> FakeResponse:
+            posted["data"] = data
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_route.httpx, "Client", FakeClient)
+    resend_resp = client.post(
+        "/api/auth/register/resend",
+        json={"email": "resend-captcha-ok@example.com", "turnstile_token": "valid-token"},
+    )
+
+    assert resend_resp.status_code == 200
+    second_code = str(resend_resp.json()["verification_code"])
+    assert len(second_code) == 6
+    assert second_code != first_code
+    assert posted["data"] == {
+        "secret": "test-secret",
+        "response": "valid-token",
+        "remoteip": "testclient",
+    }
+
+
 def test_legacy_unverified_user_can_still_login_without_pending_verification(monkeypatch) -> None:
     _apply_auth_test_patches(monkeypatch)
     client = _build_client()
