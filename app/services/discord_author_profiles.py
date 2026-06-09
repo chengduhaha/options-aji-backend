@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -15,11 +16,18 @@ from app.db.models import DiscordAuthorProfileRow
 from app.services.discord_menu_authors import list_distinct_authors, resolve_author_filter
 
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
-ALLOWED_CONTENT_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+ALLOWED_CONTENT_TYPES = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp"})
 EXT_BY_TYPE = {
     "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+}
+EXT_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
 }
 
 
@@ -51,7 +59,12 @@ def parse_display_name(author: str) -> str:
 def avatar_storage_dir() -> Path:
     cfg = get_settings()
     base = Path(cfg.kol_avatars_dir)
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AvatarValidationError("avatar_storage_unavailable") from exc
+    if not os.access(base, os.W_OK):
+        raise AvatarValidationError("avatar_storage_not_writable")
     return base
 
 
@@ -111,34 +124,61 @@ def upsert_profile_fields(
     return row
 
 
+def resolve_image_content_type(
+    content_type: str,
+    content: bytes,
+    filename: str | None = None,
+) -> str:
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    if ct in ALLOWED_CONTENT_TYPES:
+        return "image/jpeg" if ct == "image/jpg" else ct
+    if filename:
+        suffix = Path(filename).suffix.lower()
+        mapped = EXT_BY_SUFFIX.get(suffix)
+        if mapped:
+            return mapped
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    raise AvatarValidationError("unsupported_image_type")
+
+
 def save_avatar_file(
     session: Session,
     *,
     author: str,
     content: bytes,
     content_type: str,
+    filename_hint: str | None = None,
     updated_by_user_id: str | None = None,
 ) -> DiscordAuthorProfileRow:
     author = author.strip()
     if not author:
         raise AvatarValidationError("author_required")
-    ct = (content_type or "").split(";", 1)[0].strip().lower()
-    if ct not in ALLOWED_CONTENT_TYPES:
-        raise AvatarValidationError("unsupported_image_type")
     if len(content) > MAX_AVATAR_BYTES:
         raise AvatarValidationError("image_too_large")
+    ct = resolve_image_content_type(content_type, content, filename_hint)
 
     row = get_or_create_profile(session, author)
     if row.avatar_filename:
         old = avatar_file_path(row.avatar_filename)
         if old.is_file():
-            old.unlink(missing_ok=True)
+            try:
+                old.unlink(missing_ok=True)
+            except OSError as exc:
+                raise AvatarValidationError("avatar_storage_not_writable") from exc
 
     digest = hashlib.sha256(author.encode("utf-8")).hexdigest()[:12]
     ext = EXT_BY_TYPE[ct]
     filename = f"{digest}-{uuid.uuid4().hex[:8]}{ext}"
     target = avatar_file_path(filename)
-    target.write_bytes(content)
+    try:
+        target.write_bytes(content)
+    except OSError as exc:
+        raise AvatarValidationError("avatar_storage_not_writable") from exc
 
     row.avatar_filename = filename
     if updated_by_user_id:

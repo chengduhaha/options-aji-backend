@@ -272,6 +272,7 @@ async def admin_upload_author_avatar(
             author=author,
             content=content,
             content_type=file.content_type or "application/octet-stream",
+            filename_hint=file.filename,
             updated_by_user_id=admin.id,
         )
     except AvatarValidationError as exc:

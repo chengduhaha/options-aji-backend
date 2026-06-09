@@ -86,6 +86,20 @@ def _png_bytes() -> bytes:
     )
 
 
+def test_avatar_upload_accepts_image_jpg_content_type(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr("app.services.discord_author_profiles.avatar_storage_dir", lambda: tmp_path)
+    jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+    row = save_avatar_file(
+        db_session,
+        author="Alpha • TweetShift",
+        content=jpeg,
+        content_type="image/jpg",
+    )
+    assert row.avatar_filename and row.avatar_filename.endswith(".jpg")
+
+
 def test_avatar_upload_and_serve(db_session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr("app.services.discord_author_profiles.avatar_storage_dir", lambda: tmp_path)
     content = _png_bytes()

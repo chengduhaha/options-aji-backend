@@ -126,6 +126,9 @@ else
   git checkout "${GIT_BRANCH}"
 fi
 chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
+mkdir -p "${APP_DIR}/data/kol_avatars"
+chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}/data"
+chmod 775 "${APP_DIR}/data/kol_avatars"
 
 # APP_DIR 若在 /root 下，systemd 以 APP_USER 运行须能路径穿越 /root（否则 status=200/CHDIR）
 if [[ "${APP_DIR}" == /root/* ]]; then
