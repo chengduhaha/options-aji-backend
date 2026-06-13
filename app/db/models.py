@@ -787,20 +787,20 @@ class CongressTradeRow(Base):
     __tablename__ = "congress_trades"
     __table_args__ = (
         Index("idx_ct_member_symbol", "member_name", "symbol"),
-        Index("idx_ct_symbol_date", "symbol", "trade_date"),
-        Index("idx_ct_trade_date", "trade_date"),
+        Index("idx_ct_symbol_date", "symbol", "transaction_date"),
+        Index("idx_ct_trade_date", "transaction_date"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     member_name: Mapped[str] = mapped_column(String(256), nullable=False)
     chamber: Mapped[str] = mapped_column(String(16), nullable=False)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
-    trade_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    trade_date: Mapped[Optional[datetime]] = mapped_column("transaction_date", Date, nullable=True)
     transaction_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     amount_range: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     asset_description: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    filing_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
     raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        "synced_at", DateTime(timezone=True), server_default=func.now(), nullable=False
     )

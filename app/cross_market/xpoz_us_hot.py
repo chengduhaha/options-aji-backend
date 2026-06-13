@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 from app.cross_market.redis_cache import cache_get_json, cache_set_json
-from app.services.social_sentiment import _fetch_xpoz_sentiment
+from app.services.social_sentiment import _fallback_social, _fetch_xpoz_sentiment
 
 logger = logging.getLogger(__name__)
+_PER_SYMBOL_TIMEOUT_SECONDS = 1.5
+_CONCURRENT_FETCHES = 10
 
 # Liquid / meme / macro-sensitive US names — scanned in parallel, ranked by mentions.
 US_WATCHLIST: tuple[str, ...] = (
@@ -93,30 +95,38 @@ async def fetch_xpoz_us_hot(*, limit: int = 15) -> XpozHotResponse:
     if isinstance(cached, dict) and cached.get("items"):
         return XpozHotResponse.model_validate(cached)
 
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(_CONCURRENT_FETCHES)
+
+    def _item_from_result(sym: str, result: object) -> XpozHotItem:
+        source_breakdown = getattr(result, "source_breakdown", None) or {}
+        return XpozHotItem(
+            rank=0,
+            ticker=sym,
+            mentions_24h=int(getattr(result, "mentions_24h", 0)),
+            mention_growth_pct=float(getattr(result, "mentions_growth_pct", 0) or 0),
+            sentiment_score=int(getattr(result, "sentiment_score", 50)),
+            direction=_direction_from_score(int(getattr(result, "sentiment_score", 50))),
+            twitter_mentions=int(source_breakdown.get("twitter", 0)),
+            reddit_mentions=int(source_breakdown.get("reddit", 0)),
+            sample_posts=_sample_snippets(list(getattr(result, "posts", []) or [])),
+        )
 
     async def _one(sym: str) -> XpozHotItem | None:
         async with sem:
             try:
-                result = await asyncio.to_thread(_fetch_xpoz_sentiment, sym)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_xpoz_sentiment, sym),
+                    timeout=_PER_SYMBOL_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.info("xpoz hot fetch timed out for %s; using fallback", sym)
+                result = _fallback_social(sym)
             except Exception:
                 logger.debug("xpoz hot fetch failed for %s", sym, exc_info=True)
-                return None
+                result = _fallback_social(sym)
         if result is None:
-            return None
-        tw = int((result.source_breakdown or {}).get("twitter", 0))
-        rd = int((result.source_breakdown or {}).get("reddit", 0))
-        return XpozHotItem(
-            rank=0,
-            ticker=sym,
-            mentions_24h=int(result.mentions_24h),
-            mention_growth_pct=float(result.mentions_growth_pct or 0),
-            sentiment_score=int(result.sentiment_score),
-            direction=_direction_from_score(int(result.sentiment_score)),
-            twitter_mentions=tw,
-            reddit_mentions=rd,
-            sample_posts=_sample_snippets(result.posts),
-        )
+            result = _fallback_social(sym)
+        return _item_from_result(sym, result)
 
     rows = await asyncio.gather(*[_one(sym) for sym in US_WATCHLIST])
     items = [r for r in rows if r is not None and r.mentions_24h > 0]
@@ -125,6 +135,7 @@ async def fetch_xpoz_us_hot(*, limit: int = 15) -> XpozHotResponse:
 
     payload = XpozHotResponse(
         generated_at_utc=now,
+        source="xpoz+fallback",
         configured=True,
         items=ranked,
     )

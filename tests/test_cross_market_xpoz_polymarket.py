@@ -50,3 +50,41 @@ async def test_xpoz_hot_returns_unconfigured_without_api_key(monkeypatch) -> Non
 
     assert response.configured is False
     assert response.items == []
+
+
+@pytest.mark.asyncio
+async def test_xpoz_hot_uses_fallback_when_live_fetch_times_out(monkeypatch) -> None:
+    import app.config as config_mod
+    import app.cross_market.xpoz_us_hot as xpoz_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "get_settings",
+        lambda: type("Cfg", (), {"xpoz_api_key": "key"})(),
+    )
+    monkeypatch.setattr(xpoz_mod, "US_WATCHLIST", ("NVDA", "TSLA"))
+    monkeypatch.setattr(xpoz_mod, "_PER_SYMBOL_TIMEOUT_SECONDS", 0.01)
+
+    def _slow_fetch(_symbol: str):
+        import time
+
+        time.sleep(0.05)
+        return None
+
+    monkeypatch.setattr(xpoz_mod, "_fetch_xpoz_sentiment", _slow_fetch)
+
+    response = await xpoz_mod.fetch_xpoz_us_hot(limit=2)
+
+    assert response.configured is True
+    assert response.source == "xpoz+fallback"
+    assert [item.ticker for item in response.items] == ["TSLA", "NVDA"]
+    assert all(item.mentions_24h > 0 for item in response.items)
+
+
+def test_xpoz_hot_fetch_budget_is_small_enough_for_page_navigation() -> None:
+    import app.cross_market.xpoz_us_hot as xpoz_mod
+
+    worst_case_batches = (len(xpoz_mod.US_WATCHLIST) + xpoz_mod._CONCURRENT_FETCHES - 1) // xpoz_mod._CONCURRENT_FETCHES
+    worst_case_seconds = worst_case_batches * xpoz_mod._PER_SYMBOL_TIMEOUT_SECONDS
+
+    assert worst_case_seconds <= 3.0

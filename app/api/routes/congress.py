@@ -24,17 +24,14 @@ _TTL = 1800  # 30 min
 
 
 def _fetch_from_fmp(chamber: str, limit: int = 200) -> list[dict]:
-    """Fetch congress trades from FMP senate-trading / house-trading endpoint.
-
-    Note: FMP congress endpoints live under /api/v4/, not /stable/.
-    """
+    """Fetch latest congress disclosures from FMP stable endpoints."""
     cfg = get_settings()
     if not cfg.fmp_api_key:
         return []
-    endpoint = "/senate-trading" if chamber == "senate" else "/house-trading"
+    endpoint = "/stable/senate-latest" if chamber == "senate" else "/stable/house-latest"
     try:
         import httpx
-        url = f"https://financialmodelingprep.com/api/v4{endpoint}"
+        url = f"https://financialmodelingprep.com{endpoint}"
         params = {"limit": limit, "apikey": cfg.fmp_api_key}
         with httpx.Client(timeout=15.0) as client:
             resp = client.get(url, params=params)
@@ -51,8 +48,13 @@ def _upsert_trades(db: Session, trades: list[dict], chamber: str) -> None:
         try:
             raw_date = str(t.get("transactionDate") or t.get("dateRecieved") or "")[:10]
             trade_date = date.fromisoformat(raw_date) if raw_date else None
-            member = str(t.get("senator") or t.get("representative") or "").strip()
-            symbol = str(t.get("ticker") or "").strip().upper()
+            member = str(
+                t.get("senator")
+                or t.get("representative")
+                or t.get("office")
+                or f"{t.get('firstName') or ''} {t.get('lastName') or ''}"
+            ).strip()
+            symbol = str(t.get("ticker") or t.get("symbol") or "").strip().upper()
             tx_type = str(t.get("type") or t.get("transactionType") or "")
             if not member or not symbol:
                 continue
@@ -75,7 +77,6 @@ def _upsert_trades(db: Session, trades: list[dict], chamber: str) -> None:
                     transaction_type=tx_type,
                     amount_range=str(t.get("amount") or ""),
                     asset_description=str(t.get("assetDescription") or ""),
-                    comment=str(t.get("comment") or ""),
                     raw_json=t,
                 ))
         except Exception as exc:
@@ -123,7 +124,7 @@ def get_trades(
     _: Optional[str] = Depends(bearer_subscription_optional),
 ):
     """Return recent congress member trade disclosures."""
-    cache_key = f"congress:trades:{chamber}:{symbol}:{member}:{transaction_type}:{days}"
+    cache_key = f"congress:trades:v2:{chamber}:{symbol}:{member}:{transaction_type}:{days}"
     if hit := cache_get(cache_key):
         return hit
 
@@ -177,7 +178,7 @@ def get_leaderboard(
     _: Optional[str] = Depends(bearer_subscription_optional),
 ):
     """Hypothetical ROI leaderboard for congress members (buy-and-hold from disclosure date)."""
-    cache_key = f"congress:leaderboard:{chamber}:{limit}"
+    cache_key = f"congress:leaderboard:v2:{chamber}:{limit}"
     if hit := cache_get(cache_key):
         return hit
 
