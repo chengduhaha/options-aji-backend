@@ -46,6 +46,8 @@ discord_event_channel_ids = ""
 enable_discord_listener = false
 
 sync_watchlist = "SPY,QQQ,AAPL,MSFT,NVDA,TSLA,AMZN,META,GOOGL,AMD"
+sync_sp500_enabled = true
+sync_sp500_batch_size = 25
 sync_enabled = true
 
 cors_origins = "https://options-aji.vercel.app,http://localhost:3000"

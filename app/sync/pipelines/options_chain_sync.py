@@ -103,8 +103,78 @@ def _parse_futu_contract(item: dict) -> dict:
     }
 
 
+def _sync_symbol_options(
+    session,
+    symbol: str,
+    *,
+    massive_client,
+    futu_client,
+    cfg,
+) -> int:
+    """Sync one underlying's option chain; returns number of rows upserted."""
+    source = "massive"
+    snapshots: list = []
+    rows: list[dict] = []
+
+    if futu_client is not None:
+        futu_payload = futu_client.get_option_chain_snapshot(symbol, limit=2500)
+        if not futu_payload.get("error") and futu_payload.get("contracts"):
+            snapshots = list(futu_payload.get("contracts") or [])
+            rows = [_parse_futu_contract(s) for s in snapshots if s.get("ticker")]
+            source = "futu"
+        elif massive_client is not None:
+            snapshots = massive_client.get_option_chain_snapshot(
+                symbol,
+                max_contracts=2500,
+                max_pages=80,
+            )
+            rows = [_parse_snapshot(s) for s in snapshots if s.get("details", {}).get("ticker")]
+        else:
+            logger.debug("No Futu options returned for %s and Massive is not configured", symbol)
+            return 0
+    elif massive_client is not None:
+        snapshots = massive_client.get_option_chain_snapshot(
+            symbol,
+            max_contracts=2500,
+            max_pages=80,
+        )
+        rows = [_parse_snapshot(s) for s in snapshots if s.get("details", {}).get("ticker")]
+    else:
+        return 0
+
+    if not snapshots:
+        logger.debug("No snapshots returned for %s", symbol)
+        return 0
+
+    for row_data in rows:
+        ticker = row_data.pop("ticker")
+        existing = session.get(OptionsSnapshotRow, ticker)
+        if existing:
+            for k, v in row_data.items():
+                setattr(existing, k, v)
+        else:
+            session.add(OptionsSnapshotRow(ticker=ticker, **row_data))
+
+    session.commit()
+    cache_delete_pattern(f"options:chain:{symbol}*")
+    chain_data = {
+        "symbol": symbol,
+        "source": source,
+        "count": len(snapshots),
+        "synced_at": datetime.now(timezone.utc).isoformat(),
+        "contracts": snapshots,
+    }
+    cache_set(
+        key_options_chain(symbol),
+        chain_data,
+        ttl=cfg.futu_cache_ttl_seconds if source == "futu" else TTL_HOT,
+    )
+    logger.info("Options chain sync: %s via %s -> %d contracts", symbol, source, len(rows))
+    return len(rows)
+
+
 def sync_options_chain_pipeline() -> None:
-    """Pull option chain snapshots for watchlist symbols and upsert to DB."""
+    """Pull option chain snapshots for watchlist / S&P500 batch and upsert to DB."""
     cfg = get_settings()
     use_futu_background = bool(
         cfg.futu_enabled and getattr(cfg, "futu_background_options_sync_enabled", False)
@@ -113,7 +183,15 @@ def sync_options_chain_pipeline() -> None:
         logger.debug("Neither Futu nor Massive option source is enabled, skipping options chain sync")
         return
 
-    symbols = cfg.sync_watchlist_symbols
+    if cfg.sync_sp500_enabled and cfg.fmp_api_key:
+        from app.sync.sp500_symbols import next_sp500_batch
+
+        symbols = next_sp500_batch(cfg.sync_sp500_batch_size)
+        scope = "sp500_batch"
+    else:
+        symbols = cfg.sync_watchlist_symbols
+        scope = "watchlist"
+
     massive_client = get_massive_client() if cfg.massive_api_key else None
     futu_client = get_futu_client() if use_futu_background else None
     session = SessionLocal()
@@ -122,69 +200,13 @@ def sync_options_chain_pipeline() -> None:
     try:
         for symbol in symbols:
             try:
-                source = "massive"
-                if futu_client is not None:
-                    futu_payload = futu_client.get_option_chain_snapshot(symbol, limit=2500)
-                    if not futu_payload.get("error") and futu_payload.get("contracts"):
-                        snapshots = list(futu_payload.get("contracts") or [])
-                        rows = [_parse_futu_contract(s) for s in snapshots if s.get("ticker")]
-                        source = "futu"
-                    elif massive_client is not None:
-                        snapshots = massive_client.get_option_chain_snapshot(
-                            symbol,
-                            max_contracts=2500,
-                            max_pages=80,
-                        )
-                        rows = [_parse_snapshot(s) for s in snapshots if s.get("details", {}).get("ticker")]
-                    else:
-                        logger.debug("No Futu options returned for %s and Massive is not configured", symbol)
-                        continue
-                elif massive_client is not None:
-                    snapshots = massive_client.get_option_chain_snapshot(
-                        symbol,
-                        max_contracts=2500,
-                        max_pages=80,
-                    )
-                    rows = [_parse_snapshot(s) for s in snapshots if s.get("details", {}).get("ticker")]
-                else:
-                    continue
-
-                if not snapshots:
-                    logger.debug("No snapshots returned for %s", symbol)
-                    continue
-
-                # Bulk upsert
-                for row_data in rows:
-                    ticker = row_data.pop("ticker")
-                    existing = session.get(OptionsSnapshotRow, ticker)
-                    if existing:
-                        for k, v in row_data.items():
-                            setattr(existing, k, v)
-                    else:
-                        session.add(OptionsSnapshotRow(ticker=ticker, **row_data))
-
-                session.commit()
-                total_upserted += len(rows)
-
-                # Invalidate Redis cache for this symbol's chain
-                cache_delete_pattern(f"options:chain:{symbol}*")
-
-                # Build and cache the chain JSON for frontend
-                chain_data = {
-                    "symbol": symbol,
-                    "source": source,
-                    "count": len(snapshots),
-                    "synced_at": datetime.now(timezone.utc).isoformat(),
-                    "contracts": snapshots,
-                }
-                cache_set(
-                    key_options_chain(symbol),
-                    chain_data,
-                    ttl=cfg.futu_cache_ttl_seconds if source == "futu" else TTL_HOT,
+                total_upserted += _sync_symbol_options(
+                    session,
+                    symbol,
+                    massive_client=massive_client,
+                    futu_client=futu_client,
+                    cfg=cfg,
                 )
-
-                logger.info("Options chain sync: %s via %s -> %d contracts", symbol, source, len(rows))
-
             except Exception as exc:
                 session.rollback()
                 logger.warning("Options chain sync failed for %s: %s", symbol, exc)
@@ -192,4 +214,9 @@ def sync_options_chain_pipeline() -> None:
     finally:
         session.close()
 
-    logger.info("Options chain sync complete: %d total upserts", total_upserted)
+    logger.info(
+        "Options chain sync complete (%s): %d symbols, %d total upserts",
+        scope,
+        len(symbols),
+        total_upserted,
+    )

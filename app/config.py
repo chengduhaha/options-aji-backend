@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     # ── Data sync ─────────────────────────────────────────────────────────────
     # Comma-separated list of symbols to keep in sync
     sync_watchlist: str = "SPY,QQQ,AAPL,MSFT,NVDA,TSLA,AMZN,META,GOOGL,AMD"
+    sync_sp500_enabled: bool = True
+    sync_sp500_batch_size: int = 25
     sync_enabled: bool = True
     sync_timezone: str = "America/New_York"
 

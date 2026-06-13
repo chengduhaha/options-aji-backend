@@ -804,3 +804,19 @@ class CongressTradeRow(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         "synced_at", DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class CongressMemberProfileRow(Base):
+    """LLM-generated Chinese bios for Congress members."""
+    __tablename__ = "congress_member_profiles"
+
+    member_name: Mapped[str] = mapped_column(String(256), primary_key=True)
+    chamber: Mapped[str] = mapped_column(String(16), primary_key=True)
+    bio_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    party: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    state: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    committee: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    notable_trades_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

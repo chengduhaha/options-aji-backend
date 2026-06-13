@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import bearer_subscription_optional
 from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
-from app.db.models import CongressTradeRow, StockDailyBarRow
+from app.db.models import CongressMemberProfileRow, CongressTradeRow, StockDailyBarRow
 from app.db.session import db_session_dep
 from app.services.cache_service import cache_get, cache_set
 
@@ -87,6 +87,67 @@ def _upsert_trades(db: Session, trades: list[dict], chamber: str) -> None:
         db.rollback()
 
 
+def _price_on_yfinance(symbol: str, on: date) -> Optional[float]:
+    from app.tools.stock_history import fetch_yfinance_daily_history
+
+    try:
+        hist = fetch_yfinance_daily_history(symbol, period="2y")
+        if hist is None or getattr(hist, "empty", True):
+            return None
+        target = on
+        best: Optional[float] = None
+        best_delta = 9999
+        for idx, row in hist.iterrows():
+            try:
+                bar_date = idx.date() if hasattr(idx, "date") else date.fromisoformat(str(idx)[:10])
+            except (ValueError, TypeError):
+                continue
+            if bar_date > on:
+                continue
+            delta = abs((bar_date - target).days)
+            close = row.get("Close")
+            if close is not None and delta < best_delta:
+                best_delta = delta
+                best = float(close)
+        return best
+    except Exception as exc:
+        logger.debug("yfinance price fallback %s@%s: %s", symbol, on, exc)
+        return None
+
+
+def _price_on_fmp(symbol: str, on: date) -> Optional[float]:
+    cfg = get_settings()
+    if not cfg.fmp_api_key:
+        return None
+    try:
+        client = get_fmp_client()
+        if on >= date.today():
+            quote = client.get_quote(symbol)
+            if quote and quote.get("price") is not None:
+                return float(quote["price"])
+        from_d = (on - timedelta(days=7)).isoformat()
+        to_d = (on + timedelta(days=3)).isoformat()
+        bars = client.get_historical_price_eod(symbol, from_date=from_d, to_date=to_d)
+        best: Optional[float] = None
+        best_delta = 9999
+        for bar in bars:
+            raw = str(bar.get("date") or "")[:10]
+            if not raw:
+                continue
+            try:
+                bar_date = date.fromisoformat(raw)
+            except ValueError:
+                continue
+            delta = abs((bar_date - on).days)
+            if delta < best_delta and bar.get("close") is not None:
+                best_delta = delta
+                best = float(bar["close"])
+        return best
+    except Exception as exc:
+        logger.debug("FMP price fallback %s@%s: %s", symbol, on, exc)
+        return None
+
+
 def _price_on(db: Session, symbol: str, on: date) -> Optional[float]:
     row = db.execute(
         select(StockDailyBarRow.close)
@@ -99,7 +160,12 @@ def _price_on(db: Session, symbol: str, on: date) -> Optional[float]:
         .order_by(StockDailyBarRow.bar_date.desc())
         .limit(1)
     ).scalar_one_or_none()
-    return float(row) if row else None
+    if row:
+        return float(row)
+    price = _price_on_fmp(symbol, on)
+    if price is not None:
+        return price
+    return _price_on_yfinance(symbol, on)
 
 
 def _maybe_refresh(db: Session) -> None:
@@ -168,6 +234,60 @@ def get_trades(
     }
     cache_set(cache_key, result, ttl=_TTL)
     return result
+
+
+@router.get("/members")
+def get_members(
+    chamber: Optional[str] = Query(None, description="senate | house | all"),
+    db: Session = Depends(db_session_dep),
+    _: Optional[str] = Depends(bearer_subscription_optional),
+):
+    """Distinct congress members for backtest dropdown."""
+    _maybe_refresh(db)
+    q = select(CongressTradeRow.member_name, CongressTradeRow.chamber).distinct()
+    if chamber and chamber != "all":
+        q = q.where(CongressTradeRow.chamber == chamber)
+    rows = db.execute(q.order_by(CongressTradeRow.member_name.asc())).all()
+    members = [{"member": m, "chamber": c} for m, c in rows if m]
+    return {"members": members, "total": len(members)}
+
+
+@router.get("/profile")
+def get_member_profile(
+    member: str = Query(..., min_length=1),
+    chamber: str = Query(..., description="senate | house"),
+    db: Session = Depends(db_session_dep),
+    _: Optional[str] = Depends(bearer_subscription_optional),
+):
+    """Return cached LLM-generated member bio."""
+    row = db.execute(
+        select(CongressMemberProfileRow).where(
+            and_(
+                CongressMemberProfileRow.member_name == member,
+                CongressMemberProfileRow.chamber == chamber,
+            )
+        ).limit(1)
+    ).scalar_one_or_none()
+    if not row:
+        return {
+            "member": member,
+            "chamber": chamber,
+            "bio_zh": None,
+            "party": None,
+            "state": None,
+            "committee": None,
+            "notable_trades_summary": None,
+        }
+    return {
+        "member": row.member_name,
+        "chamber": row.chamber,
+        "bio_zh": row.bio_zh,
+        "party": row.party,
+        "state": row.state,
+        "committee": row.committee,
+        "notable_trades_summary": row.notable_trades_summary,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 @router.get("/leaderboard")

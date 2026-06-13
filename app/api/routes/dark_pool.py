@@ -80,6 +80,10 @@ def get_market_tide(
 
     today_tide = _compute_tide(db)
 
+    symbol_count = db.execute(
+        select(func.count(func.distinct(OptionsSnapshotRow.underlying_ticker)))
+    ).scalar_one_or_none() or 0
+
     history_rows = db.execute(
         select(MarketTideDailyRow)
         .order_by(MarketTideDailyRow.trade_date.desc())
@@ -101,6 +105,9 @@ def get_market_tide(
     result = {
         "today": {"date": date.today().isoformat(), **today_tide},
         "history": history,
+        "scope": "sp500_options_snapshots",
+        "scope_label_zh": "标普500成分股期权快照（分批同步，非 FINRA 暗池成交）",
+        "symbol_count": int(symbol_count),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     cache_set(cache_key, result, ttl=_TTL)
@@ -170,8 +177,17 @@ def get_flow_summary(
 
     flow_items.sort(key=lambda x: x["total_premium_usd"], reverse=True)
 
+    symbol_count = db.execute(
+        select(func.count(func.distinct(OptionsSnapshotRow.underlying_ticker)))
+    ).scalar_one_or_none() or 0
+
     result = {
         "items": flow_items[:top_n],
+        "scope": "sp500_options_snapshots",
+        "scope_label_zh": "标普500成分股（分批同步）",
+        "ranking": "daily_snapshot_total_premium",
+        "ranking_label_zh": "当日快照 · 按估算权利金总额排名",
+        "symbol_count": int(symbol_count),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     cache_set(cache_key, result, ttl=_TTL)

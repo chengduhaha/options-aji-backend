@@ -94,6 +94,20 @@ def start_scheduler() -> None:
         sync_analyst_ratings_pipeline,
     )
     from app.sync.pipelines.company_profile_sync import sync_company_profiles_pipeline
+    from app.sync.pipelines.stock_daily_bars_sync import sync_stock_daily_bars_pipeline
+    from app.services.congress_member_profiles import refresh_congress_member_profiles_pipeline
+
+    _scheduler.add_job(
+        lambda: _run_safe(sync_stock_daily_bars_pipeline, "stock_daily_bars"),
+        CronTrigger(hour=7, minute=15, day_of_week="mon-fri", timezone=tz),
+        id="stock_daily_bars", replace_existing=True,
+    )
+    _scheduler.add_job(
+        lambda: _run_safe(refresh_congress_member_profiles_pipeline, "congress_profiles"),
+        CronTrigger(hour=8, minute=0, day_of_week="mon-sun", timezone=tz),
+        id="congress_profiles", replace_existing=True,
+    )
+
     from app.services.social_sentiment import ingest_all_social_pipelines
 
     # ── Every 15 min during market hours ──────────────────────────────────────────────

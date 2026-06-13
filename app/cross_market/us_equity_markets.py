@@ -90,18 +90,26 @@ _TICKER_FALSE_POSITIVES = frozenset(
 
 def extract_related_ticker(text: str) -> str | None:
     """Only accept explicit cashtags or parenthesized tickers — no loose word matching."""
+    tickers = extract_related_tickers(text)
+    return tickers[0] if tickers else None
+
+
+def extract_related_tickers(text: str) -> list[str]:
+    """Return all explicit cashtags and parenthesized tickers from text."""
     upper = text.upper()
-    cashtag = _CASHTAG_RE.search(upper)
-    if cashtag:
-        sym = cashtag.group(1)
-        if sym not in _TICKER_FALSE_POSITIVES:
-            return sym
-    parens = _PARENS_TICKER_RE.search(upper)
-    if parens:
-        sym = parens.group(1)
-        if sym not in _TICKER_FALSE_POSITIVES and 1 <= len(sym) <= 5:
-            return sym
-    return None
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _CASHTAG_RE.finditer(upper):
+        sym = match.group(1)
+        if sym not in _TICKER_FALSE_POSITIVES and sym not in seen:
+            seen.add(sym)
+            found.append(sym)
+    for match in _PARENS_TICKER_RE.finditer(upper):
+        sym = match.group(1)
+        if sym not in _TICKER_FALSE_POSITIVES and 1 <= len(sym) <= 5 and sym not in seen:
+            seen.add(sym)
+            found.append(sym)
+    return found
 
 
 def is_us_equity_related(text: str) -> bool:
@@ -135,6 +143,7 @@ def _normalize_event_market(event: dict[str, Any], market: dict[str, Any]) -> di
         "volume": market.get("volume") or event.get("volume"),
         "liquidity": market.get("liquidity") or event.get("liquidity"),
         "related_ticker": extract_related_ticker(f"{title} {question}"),
+        "related_tickers": extract_related_tickers(f"{title} {question}"),
     }
 
 
@@ -191,6 +200,7 @@ def market_to_hot_fields(market: dict[str, Any]) -> dict[str, Any]:
         "event_time": str(market.get("endDate") or ""),
         "polymarket_probability": round(pm_prob, 3),
         "related_ticker": market.get("related_ticker"),
+        "related_tickers": market.get("related_tickers") or [],
         "volume_24h": round(vol, 2) if vol > 0 else None,
         "liquidity": round(liq, 2) if liq > 0 else None,
         "slug": market.get("slug"),

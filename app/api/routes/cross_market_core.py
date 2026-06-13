@@ -15,6 +15,7 @@ from app.cross_market.db_async import SessionLocal as CrossMarketSessionLocal
 from app.cross_market.persistence import upsert_event_snapshots
 from app.cross_market.polymarket_client import PolymarketClient
 from app.cross_market.us_equity_markets import fetch_us_equity_markets, market_to_hot_fields
+from app.cross_market.xpoz_ticker_detail import XpozTickerDetailResponse, fetch_xpoz_ticker_detail
 from app.cross_market.xpoz_us_hot import XpozHotResponse, fetch_xpoz_us_hot
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ class HotEventItem(BaseModel):
     event_time: str
     polymarket_probability: float = Field(ge=0, le=1)
     related_ticker: str | None = None
+    related_tickers: list[str] = Field(default_factory=list)
     volume_24h: float | None = None
     liquidity: float | None = None
     slug: str | None = None
@@ -159,3 +161,11 @@ async def get_xpoz_hot(
     limit: int = Query(default=15, ge=1, le=30),
 ) -> XpozHotResponse:
     return await fetch_xpoz_us_hot(limit=limit)
+
+
+@router.get("/xpoz/ticker/{symbol}", response_model=XpozTickerDetailResponse)
+async def get_xpoz_ticker_detail(symbol: str) -> XpozTickerDetailResponse:
+    raw = symbol.strip().upper()
+    if not raw or not _TICKER_RE.match(raw):
+        raise HTTPException(status_code=422, detail="Invalid equity symbol.")
+    return await fetch_xpoz_ticker_detail(raw)
