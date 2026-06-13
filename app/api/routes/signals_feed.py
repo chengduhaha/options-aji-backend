@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Literal, Optional, cast
 
@@ -9,10 +12,14 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.api.deps import bearer_subscription_optional
+from app.services.cache_service import cache_get, cache_set
 from app.services.locale import Locale, parse_locale
 from app.tools.openbb_tools import OpenBBToolkit, build_default_toolkit
 
 router = APIRouter(tags=["signals"])
+SIGNALS_FEED_TTL_SECONDS = 300
+logger = logging.getLogger(__name__)
+_signals_background_scheduled_at: dict[str, float] = {}
 
 SignalPriority = Literal["urgent", "high", "medium", "low"]
 SignalDir = Literal["bull", "bear", "neut"]
@@ -36,6 +43,61 @@ class SignalsFeedEnvelope(BaseModel):
     generated_at_utc: str
     source: str
     signals: list[SignalCard]
+
+
+def _signals_feed_cache_key(locale: Locale) -> str:
+    return f"signals:feed:v1:{locale}"
+
+
+def get_cached_signals_feed(locale: Locale = "zh") -> SignalsFeedEnvelope | None:
+    cached = cache_get(_signals_feed_cache_key(parse_locale(locale)))
+    if not isinstance(cached, dict):
+        return None
+    try:
+        return SignalsFeedEnvelope.model_validate(cached)
+    except Exception:
+        return None
+
+
+def _should_schedule_signals_warm(locale: Locale, cooldown_seconds: int = 60) -> bool:
+    now = time.monotonic()
+    last = _signals_background_scheduled_at.get(locale)
+    if last is not None and now - last < cooldown_seconds:
+        return False
+    _signals_background_scheduled_at[locale] = now
+    return True
+
+
+def _fallback_signals_feed() -> SignalsFeedEnvelope:
+    return SignalsFeedEnvelope(
+        generated_at_utc=datetime.now(timezone.utc).isoformat(),
+        source="signals_cache_miss_refreshing",
+        signals=[],
+    )
+
+
+def _build_signals_feed(locale: Locale) -> SignalsFeedEnvelope:
+    toolkit = build_default_toolkit()
+
+    equities = ["SPY", "QQQ", "NVDA"]
+    merged: list[SignalCard] = [_vix_macro_card(toolkit)]
+    for symbol in equities:
+        merged.extend(_build_equity_cards(toolkit, symbol))
+
+    envelope = SignalsFeedEnvelope(
+        generated_at_utc=datetime.now(timezone.utc).isoformat(),
+        source="openbb_toolkit:yfinance[+optional_gex_upstream]",
+        signals=merged,
+    )
+    cache_set(_signals_feed_cache_key(locale), envelope.model_dump(), ttl=SIGNALS_FEED_TTL_SECONDS)
+    return envelope
+
+
+def _warm_signals_feed_background(locale: Locale) -> None:
+    try:
+        _build_signals_feed(locale)
+    except Exception as exc:
+        logger.warning("signals feed background warm failed: %s", exc)
 
 
 def _dir_strength_pct(pct: Optional[float]) -> tuple[SignalDir, int]:
@@ -213,18 +275,17 @@ def _vix_macro_card(tk: OpenBBToolkit) -> SignalCard:
 @router.get("/api/signals/feed")
 def signals_feed(
     locale: str = Query(default="zh", pattern="^(zh|en)$"),
+    refresh: bool = Query(default=False, description="Force synchronous live signal rebuild."),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> SignalsFeedEnvelope:
-    _ = parse_locale(locale)
-    toolkit = build_default_toolkit()
+    loc = parse_locale(locale)
+    refresh_requested = refresh if isinstance(refresh, bool) else False
+    if not refresh_requested and (cached := get_cached_signals_feed(loc)) is not None:
+        return cached
 
-    equities = ["SPY", "QQQ", "NVDA"]
-    merged: list[SignalCard] = [_vix_macro_card(toolkit)]
-    for symbol in equities:
-        merged.extend(_build_equity_cards(toolkit, symbol))
+    if refresh_requested:
+        return _build_signals_feed(loc)
 
-    return SignalsFeedEnvelope(
-        generated_at_utc=datetime.now(timezone.utc).isoformat(),
-        source="openbb_toolkit:yfinance[+optional_gex_upstream]",
-        signals=merged,
-    )
+    if _should_schedule_signals_warm(loc):
+        threading.Thread(target=_warm_signals_feed_background, args=(loc,), daemon=True).start()
+    return _fallback_signals_feed()

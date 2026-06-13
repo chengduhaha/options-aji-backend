@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import httpx
 import yfinance as yf
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, select
 
@@ -38,6 +38,7 @@ WATCHLIST_MOVER = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA", "MSFT", "META", "AMZN"]
 PULSE = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
 
 _ai_summary_cache: dict[str, Any] = {"ts_monotonic": 0.0, "text": "", "model": ""}
+_overview_background_scheduled_at: float = 0.0
 
 
 class AiSummaryResponse(BaseModel):
@@ -47,22 +48,55 @@ class AiSummaryResponse(BaseModel):
     cached: bool = False
 
 
-@router.get("/overview")
-def market_overview(
-    _: Optional[str] = Depends(bearer_subscription_optional),
-    refresh: bool = Query(False, description="为 true 时跳过 Redis，强制重新拉取并写回缓存"),
-) -> dict[str, object]:
-    """Single payload for OptionsAji home dashboard."""
+def _should_schedule_overview_warm(cooldown_seconds: int = 60) -> bool:
+    global _overview_background_scheduled_at
+    now = time.monotonic()
+    if now - _overview_background_scheduled_at < cooldown_seconds:
+        return False
+    _overview_background_scheduled_at = now
+    return True
 
+
+def _fallback_market_overview() -> dict[str, object]:
+    import datetime as dt
+
+    session, session_label = get_us_market_session()
+    return {
+        "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "marketSession": session,
+        "marketSessionLabel": session_label,
+        "pulse": [],
+        "volatility": {
+            "vix": None,
+            "vixChangePct": None,
+            "band": "刷新中",
+            "vixSeries": [],
+            "termStructure": {"label": "刷新中", "note": "市场总览正在后台更新。"},
+        },
+        "liquidity": {
+            "putCallRatioVolumeApprox": None,
+            "methodology": "市场总览缓存未命中，后台正在刷新。",
+            "symbolsSampled": WATCHLIST_MOVER,
+            "source": "CACHE_MISS_REFRESHING",
+        },
+        "unusual": [],
+        "earnings": [],
+        "gexQuick": [],
+        "watchlist": WATCHLIST_MOVER,
+        "fromCache": False,
+        "cacheMiss": True,
+    }
+
+
+def _warm_market_overview_blocking() -> None:
+    try:
+        _build_market_overview_payload()
+    except Exception as exc:
+        logger.warning("market overview background warm failed: %s", exc)
+
+
+def _build_market_overview_payload() -> dict[str, object]:
     cfg = get_settings()
-    cache_key = key_market_dashboard_overview()
-    if not refresh and cfg.redis_enabled:
-        hit = cache_get(cache_key)
-        if isinstance(hit, dict):
-            out = dict(hit)
-            out["fromCache"] = True
-            return out
-
     toolkit = build_default_toolkit()
     session, session_label = get_us_market_session()
 
@@ -210,9 +244,34 @@ def market_overview(
     }
 
     if cfg.redis_enabled:
-        cache_set(cache_key, payload, ttl=int(cfg.redis_cache_ttl_hot))
+        cache_set(key_market_dashboard_overview(), payload, ttl=int(cfg.redis_cache_ttl_hot))
 
     return payload
+
+
+@router.get("/overview")
+def market_overview(
+    background_tasks: BackgroundTasks,
+    _: Optional[str] = Depends(bearer_subscription_optional),
+    refresh: bool = Query(False, description="为 true 时跳过 Redis，强制重新拉取并写回缓存"),
+) -> dict[str, object]:
+    """Single payload for OptionsAji home dashboard."""
+
+    cfg = get_settings()
+    cache_key = key_market_dashboard_overview()
+    if not refresh and cfg.redis_enabled:
+        hit = cache_get(cache_key)
+        if isinstance(hit, dict):
+            out = dict(hit)
+            out["fromCache"] = True
+            return out
+
+    if not refresh:
+        if cfg.redis_enabled and _should_schedule_overview_warm():
+            background_tasks.add_task(_warm_market_overview_blocking)
+        return _fallback_market_overview()
+
+    return _build_market_overview_payload()
 
 
 @router.get("/{symbol}")
@@ -395,7 +454,9 @@ def market_ai_summary(
         )
         return payload
 
-    overview = market_overview(_)
+    overview = cache_get(key_market_dashboard_overview())
+    if not isinstance(overview, dict):
+        overview = _fallback_market_overview()
     payload = json.dumps(overview, ensure_ascii=False, default=str)
     prompt = (
         "你是 OptionsAji 市场编辑。请用中文输出 2-3 句话，概括当前指数强弱、波动率环境与 1-2 个简单风险点。"

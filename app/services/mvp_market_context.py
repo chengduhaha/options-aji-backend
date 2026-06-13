@@ -5,16 +5,22 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.api.routes.market_dashboard import market_overview
-from app.api.routes.signals_feed import signals_feed
+from app.api.routes.signals_feed import get_cached_signals_feed
 from app.db.models import TreasuryRateRow
 from app.db.session import SessionLocal
+from app.services.cache_service import cache_get, key_market_dashboard_overview
 
 
 def build_mvp_market_context() -> dict[str, Any]:
-    overview = market_overview(_=None, refresh=False)
-    signals_env = signals_feed(_=None)
-    signals = signals_env.model_dump()
+    overview = cache_get(key_market_dashboard_overview())
+    if not isinstance(overview, dict):
+        overview = {"fromCache": False, "cacheMiss": True}
+    signals_env = get_cached_signals_feed("zh")
+    signals = (
+        signals_env.model_dump()
+        if signals_env is not None
+        else {"generated_at_utc": None, "source": "signals_cache_miss", "signals": []}
+    )
 
     treasury: dict[str, Any] = {"rates": [], "synced_at": None}
     session = SessionLocal()

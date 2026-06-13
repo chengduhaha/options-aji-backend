@@ -78,6 +78,26 @@ def _cache_key(context: dict[str, Any], locale: Locale) -> str:
     return f"mvp:market-insights:v2:{hash(raw)}"
 
 
+def market_insights_cache_key(context: dict[str, Any], locale: Locale) -> str:
+    return _cache_key(context, parse_locale(locale))
+
+
+def get_cached_mvp_market_insights(
+    context: dict[str, Any],
+    *,
+    locale: Locale = "zh",
+) -> MvpMarketInsightsPayload | None:
+    cached = cache_get(market_insights_cache_key(context, locale))
+    if not isinstance(cached, dict):
+        return None
+    try:
+        payload = MvpMarketInsightsPayload.model_validate(cached)
+    except Exception:
+        return None
+    payload.cached = True
+    return payload
+
+
 def _context_fingerprint(ctx: dict[str, Any]) -> dict[str, Any]:
     ov = ctx.get("overview") if isinstance(ctx.get("overview"), dict) else {}
     vol = ov.get("volatility") if isinstance(ov.get("volatility"), dict) else {}
@@ -491,15 +511,10 @@ async def generate_mvp_market_insights(
 ) -> MvpMarketInsightsPayload:
     """DeepAgents 推理；失败则规则兜底。"""
     loc = parse_locale(locale)
-    cache_key = _cache_key(context, loc)
-    cached = cache_get(cache_key)
-    if isinstance(cached, dict):
-        try:
-            payload = MvpMarketInsightsPayload.model_validate(cached)
-            payload.cached = True
-            return payload
-        except Exception:
-            pass
+    cache_key = market_insights_cache_key(context, loc)
+    cached = get_cached_mvp_market_insights(context, locale=loc)
+    if cached is not None:
+        return cached
 
     if not has_llm_provider():
         logger.info("No LLM provider configured; MVP market insights use rules")

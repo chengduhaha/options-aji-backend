@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import bearer_subscription_optional
 from app.config import get_settings
+from app.services.cache_service import cache_get, cache_set
 from app.services.locale import parse_locale, pick_text
 from app.services.social_sentiment import (
     KolDirectoryResponse,
@@ -20,6 +21,7 @@ from app.services.social_sentiment import (
 )
 
 router = APIRouter(prefix="/api/social", tags=["social"])
+SOCIAL_ROUTE_TTL_SECONDS = 300
 
 
 @router.get("/kol")
@@ -54,8 +56,14 @@ def social_radar(
     cfg = get_settings()
     if not cfg.feature_social_enabled:
         return {"generated_at_utc": "", "items": []}
+    cache_key = f"social:radar:v1:{limit}"
+    cached = cache_get(cache_key)
+    if isinstance(cached, dict):
+        return cached
     payload = get_social_radar(limit=limit)
-    return payload.model_dump()
+    body = payload.model_dump()
+    cache_set(cache_key, body, ttl=SOCIAL_ROUTE_TTL_SECONDS)
+    return body
 
 
 @router.get("/smart-vs-retail/{symbol}", response_model=SmartVsRetailSnapshot)
@@ -82,7 +90,14 @@ def smart_vs_retail(
             ai_narrative_zh="social feature disabled",
             confidence=0.0,
         )
-    snapshot = build_smart_vs_retail(symbol)
+    sym = symbol.strip().upper()
+    cache_key = f"social:smart-vs-retail:v1:{sym}"
+    cached = cache_get(cache_key)
+    if isinstance(cached, dict):
+        snapshot = SmartVsRetailSnapshot.model_validate(cached)
+    else:
+        snapshot = build_smart_vs_retail(sym)
+        cache_set(cache_key, snapshot.model_dump(), ttl=SOCIAL_ROUTE_TTL_SECONDS)
     narrative = pick_text(
         zh=snapshot.ai_narrative_zh,
         en=getattr(snapshot, "ai_narrative_en", None),

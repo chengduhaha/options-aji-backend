@@ -28,7 +28,13 @@ from app.db.session import db_session_dep
 from app.ingest.message_store import list_discord_feed_rows
 from app.services.cache_service import TTL_AI, cache_get, cache_set
 from app.services.llm_router import has_llm_provider, post_chat_completions_with_fallback
-from app.services.mvp_market_agent import MvpMarketInsightsPayload, generate_mvp_market_insights
+from app.services.mvp_market_agent import (
+    MvpMarketInsightsPayload,
+    _rule_based_insights,
+    generate_mvp_market_insights,
+    get_cached_mvp_market_insights,
+    market_insights_cache_key,
+)
 from app.services.mvp_market_context import build_mvp_market_context
 from app.services.discord_menu_authors import resolve_author_filter
 from app.services.locale import Locale, parse_locale, pick_text
@@ -74,6 +80,10 @@ def _log_future_exception(task: Any) -> None:
 
 def _warm_stock_options_insights_blocking(body: StockOptionsInsightRequest) -> None:
     asyncio.run(generate_stock_options_insights(body))
+
+
+def _warm_market_insights_blocking(context: dict[str, Any], locale: Locale) -> None:
+    asyncio.run(generate_mvp_market_insights(context, locale=locale))
 
 
 def _treasury_read(row: TreasuryRateRow | None) -> dict[str, Any]:
@@ -715,6 +725,7 @@ def _call_war_room_llm(
 
 @router.get("/market-insights")
 async def mvp_market_insights(
+    background_tasks: BackgroundTasks,
     locale: str = Query(default="zh", pattern="^(zh|en)$"),
     entitlement: MvpEntitlement = Depends(resolve_mvp_entitlement),
 ) -> dict[str, Any]:
@@ -722,11 +733,16 @@ async def mvp_market_insights(
     loc = parse_locale(locale)
     try:
         context = build_mvp_market_context()
-        payload = await generate_mvp_market_insights(context, locale=loc)
+        cached = get_cached_mvp_market_insights(context, locale=loc)
+        if cached is not None:
+            payload = cached
+        else:
+            cache_key = market_insights_cache_key(context, loc)
+            if has_llm_provider() and _should_schedule_llm(cache_key):
+                background_tasks.add_task(_warm_market_insights_blocking, context, loc)
+            payload = _rule_based_insights(context, loc)
     except Exception as exc:
         logger.exception("MVP market-insights failed: %s", exc)
-        from app.services.mvp_market_agent import _rule_based_insights
-
         try:
             payload = _rule_based_insights(build_mvp_market_context(), loc)
         except Exception:

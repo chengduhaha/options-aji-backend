@@ -31,6 +31,7 @@ from app.api.routes.divergence import router as divergence_router
 from app.api.routes.earnings_symbol import router as earnings_symbol_router
 from app.api.routes.feed_ai import router as feed_ai_router
 from app.api.routes.feed_unified import router as feed_unified_router
+from app.api.routes.fusion import router as fusion_router
 from app.api.routes.health import router as health_router
 from app.api.routes.ibkr_routes import router as ibkr_router
 from app.api.routes.integration_status import router as integration_router
@@ -276,6 +277,7 @@ def create_application() -> FastAPI:
     app.include_router(news_router)
     app.include_router(analyst_router)
     app.include_router(market_overview_router)
+    app.include_router(fusion_router)
     app.include_router(market_dashboard_router)
     app.include_router(stock_detail_router)
     app.include_router(options_router)

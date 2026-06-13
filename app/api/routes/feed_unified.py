@@ -129,6 +129,7 @@ def unified_feed(
         description="When true, only include social posts from configured KOL handles.",
     ),
     menu_slot: str = Query(default="feed"),
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     session: Session = Depends(db_session_dep),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> FeedEnvelope:
@@ -142,7 +143,7 @@ def unified_feed(
 
     kol_set = kol_handle_set_from_settings()
     if want_signals:
-        env = signals_feed(_)
+        env = signals_feed(locale=locale, _=_)
         sigs: list[SignalCard] = env.signals[:limit_signals]
         for s in sigs:
             if ticker and s.ticker.upper() != ticker.strip().upper():
@@ -270,6 +271,7 @@ def unified_feed_timeline(
     ),
     hours: int = Query(default=72, ge=1, le=24 * 30),
     menu_slot: str = Query(default="feed"),
+    locale: str = Query(default="zh", pattern="^(zh|en)$"),
     session: Session = Depends(db_session_dep),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> FeedEnvelope:
@@ -289,134 +291,147 @@ def unified_feed_timeline(
     kind_filter = kind.strip().lower() if kind else ""
     sentiment_filter = sentiment.strip().lower() if sentiment else ""
     priority_filter = priority.strip().lower() if priority else ""
+    want_all = kind_filter == ""
+    want_signals = want_all or kind_filter == "signal"
+    want_discord = want_all or kind_filter == "discord"
+    want_macro = want_all or kind_filter == "macro"
+    want_news = want_all or kind_filter == "news"
+    want_twitter = want_all or kind_filter == "twitter"
+    want_resonance = want_all or kind_filter == "resonance"
 
     kol_set = kol_handle_set_from_settings()
 
     items: list[FeedItem] = []
 
-    env = signals_feed(_)
-    sigs: list[SignalCard] = env.signals[:60]
-    for s in sigs:
-        if tk_up and s.ticker.upper() != tk_up:
-            continue
-        items.append(
-            FeedItem(
-                id=f"sig-{s.id}",
-                kind="signal",
-                created_at_utc=env.generated_at_utc,
-                title=s.title,
-                body=s.summary,
-                tickers=[s.ticker],
-                sentiment=s.direction,
-                priority=s.priority,
+    if want_signals:
+        env = signals_feed(locale=locale, _=_)
+        sigs: list[SignalCard] = env.signals[:60]
+        for s in sigs:
+            if tk_up and s.ticker.upper() != tk_up:
+                continue
+            items.append(
+                FeedItem(
+                    id=f"sig-{s.id}",
+                    kind="signal",
+                    created_at_utc=env.generated_at_utc,
+                    title=s.title,
+                    body=s.summary,
+                    tickers=[s.ticker],
+                    sentiment=s.direction,
+                    priority=s.priority,
+                )
             )
-        )
 
-    rows_dc = list_discord_feed_rows(
-        session,
-        ticker=ticker,
-        hours=hours,
-        limit=80,
-        authors=discord_authors,
-    )
-    for r in rows_dc:
-        items.append(
-            _discord_feed_item(
-                r_id=r.id,
-                created=r.timestamp_utc_iso,
-                author=r.author,
-                content=r.content,
-                tickers=r.tickers,
-                enrichment_title_zh=r.enrichment_title_zh,
-                enrichment_summary_zh=r.enrichment_summary_zh,
-                enrichment_bullets_zh=r.enrichment_bullets_zh,
-                enrichment_risk_zh=r.enrichment_risk_zh,
-                enrichment_lang=r.enrichment_lang,
+    if want_discord:
+        rows_dc = list_discord_feed_rows(
+            session,
+            ticker=ticker,
+            hours=hours,
+            limit=80,
+            authors=discord_authors,
+        )
+        for r in rows_dc:
+            items.append(
+                _discord_feed_item(
+                    r_id=r.id,
+                    created=r.timestamp_utc_iso,
+                    author=r.author,
+                    content=r.content,
+                    tickers=r.tickers,
+                    enrichment_title_zh=r.enrichment_title_zh,
+                    enrichment_summary_zh=r.enrichment_summary_zh,
+                    enrichment_bullets_zh=r.enrichment_bullets_zh,
+                    enrichment_risk_zh=r.enrichment_risk_zh,
+                    enrichment_lang=r.enrichment_lang,
+                )
             )
-        )
 
-    for row in fetch_macro_calendar_rows(limit=45):
-        eid = macro_row_stable_id(row)
-        event = str(row.get("event") or "宏观事件")
-        country = str(row.get("country") or "")
-        impact = str(row.get("impact") or "")
-        est = row.get("estimate")
-        prev = row.get("previous")
-        body_parts = [p for p in (country, impact) if p]
-        if est is not None:
-            body_parts.append(f"预期 {est}")
-        if prev is not None:
-            body_parts.append(f"前值 {prev}")
-        created = macro_row_timestamp_iso(row)
-        items.append(
-            FeedItem(
-                id=eid,
-                kind="macro",
-                created_at_utc=created,
-                title=event[:500],
-                body=" · ".join(body_parts) or "宏观日历",
+    if want_macro:
+        for row in fetch_macro_calendar_rows(limit=45):
+            eid = macro_row_stable_id(row)
+            event = str(row.get("event") or "宏观事件")
+            country = str(row.get("country") or "")
+            impact = str(row.get("impact") or "")
+            est = row.get("estimate")
+            prev = row.get("previous")
+            body_parts = [p for p in (country, impact) if p]
+            if est is not None:
+                body_parts.append(f"预期 {est}")
+            if prev is not None:
+                body_parts.append(f"前值 {prev}")
+            created = macro_row_timestamp_iso(row)
+            items.append(
+                FeedItem(
+                    id=eid,
+                    kind="macro",
+                    created_at_utc=created,
+                    title=event[:500],
+                    body=" · ".join(body_parts) or "宏观日历",
+                )
             )
-        )
 
-    news_rows = session.execute(
-        select(StockNewsRow).order_by(StockNewsRow.published_at.desc()).limit(200)
-    ).scalars().all()
-    for nr in news_rows:
-        syms = [str(s).strip().upper() for s in (nr.symbols or []) if s]
-        if tk_up and tk_up not in syms:
-            continue
-        created = nr.published_at.astimezone(timezone.utc).isoformat()
-        title = (nr.title_zh or "").strip() or nr.title
-        snippet = (
-            ((nr.summary_zh or "") or "").strip()
-            or ((nr.content or "") or "").strip()
-        )[:4000]
-        src = nr.source or "FMP"
-        body_blob = snippet or title
-        items.append(
-            FeedItem(
-                id=f"news-{nr.id}",
-                kind="news",
-                created_at_utc=created,
-                title=title[:512],
-                body=f"[{src}] · {body_blob}" if body_blob else f"[{src}]",
-                tickers=list(syms[:24]),
+    if want_news:
+        news_rows = session.execute(
+            select(StockNewsRow).order_by(StockNewsRow.published_at.desc()).limit(200)
+        ).scalars().all()
+        for nr in news_rows:
+            syms = [str(s).strip().upper() for s in (nr.symbols or []) if s]
+            if tk_up and tk_up not in syms:
+                continue
+            created = nr.published_at.astimezone(timezone.utc).isoformat()
+            title = (nr.title_zh or "").strip() or nr.title
+            snippet = (
+                ((nr.summary_zh or "") or "").strip()
+                or ((nr.content or "") or "").strip()
+            )[:4000]
+            src = nr.source or "FMP"
+            body_blob = snippet or title
+            items.append(
+                FeedItem(
+                    id=f"news-{nr.id}",
+                    kind="news",
+                    created_at_utc=created,
+                    title=title[:512],
+                    body=f"[{src}] · {body_blob}" if body_blob else f"[{src}]",
+                    tickers=list(syms[:24]),
+                )
             )
-        )
 
-    social_rows = session.execute(
-        select(SocialPostRow).order_by(SocialPostRow.created_at.desc()).limit(200)
-    ).scalars().all()
-    for sr in social_rows:
-        if not social_row_matches_kol_filter(sr=sr, kol_only=kol_only, kol_set=kol_set):
-            continue
-        ticks = [str(t).strip().upper() for t in (sr.tickers or []) if t]
-        if tk_up and tk_up not in ticks:
-            continue
-        created = sr.created_at.astimezone(timezone.utc).isoformat()
-        source_label = "X" if sr.source == "twitter" else "Reddit"
-        title = (sr.title or "").strip() or (sr.author or source_label)
-        body = ((sr.content or "").strip() or title)[:4000]
-        raw = sr.raw_json if isinstance(sr.raw_json, dict) else {}
-        kh = str(raw.get("kol_handle") or "").strip()
-        kol_badge = ""
-        if kh or bool(raw.get("kol_tracked")):
-            kol_badge = "[KOL] "
-        items.append(
-            FeedItem(
-                id=f"social-{sr.source}-{sr.external_id}",
-                kind="twitter",
-                created_at_utc=created,
-                title=f"{kol_badge}[{source_label}] {title[:480]}",
-                body=body,
-                tickers=ticks[:24],
-                raw_body=sr.content,
+    if want_twitter:
+        social_rows = session.execute(
+            select(SocialPostRow).order_by(SocialPostRow.created_at.desc()).limit(200)
+        ).scalars().all()
+        for sr in social_rows:
+            if not social_row_matches_kol_filter(sr=sr, kol_only=kol_only, kol_set=kol_set):
+                continue
+            ticks = [str(t).strip().upper() for t in (sr.tickers or []) if t]
+            if tk_up and tk_up not in ticks:
+                continue
+            created = sr.created_at.astimezone(timezone.utc).isoformat()
+            source_label = "X" if sr.source == "twitter" else "Reddit"
+            title = (sr.title or "").strip() or (sr.author or source_label)
+            body = ((sr.content or "").strip() or title)[:4000]
+            raw = sr.raw_json if isinstance(sr.raw_json, dict) else {}
+            kh = str(raw.get("kol_handle") or "").strip()
+            kol_badge = ""
+            if kh or bool(raw.get("kol_tracked")):
+                kol_badge = "[KOL] "
+            items.append(
+                FeedItem(
+                    id=f"social-{sr.source}-{sr.external_id}",
+                    kind="twitter",
+                    created_at_utc=created,
+                    title=f"{kol_badge}[{source_label}] {title[:480]}",
+                    body=body,
+                    tickers=ticks[:24],
+                    raw_body=sr.content,
+                )
             )
-        )
 
-    res_block = list_resonance_timeline(limit=48, symbol=ticker)
-    for ritem in res_block.items:
-        items.append(_feed_item_from_resonance_row(ritem))
+    if want_resonance:
+        res_block = list_resonance_timeline(limit=48, symbol=ticker)
+        for ritem in res_block.items:
+            items.append(_feed_item_from_resonance_row(ritem))
 
     if cutoff:
         cutoff_utc = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
