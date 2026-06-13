@@ -26,7 +26,7 @@ def _compute_tide(db: Session) -> dict:
         rows = db.execute(
             select(
                 OptionsSnapshotRow.contract_type,
-                func.sum(OptionsSnapshotRow.midpoint * OptionsSnapshotRow.day_volume).label("net_premium"),
+                func.sum(OptionsSnapshotRow.midpoint * OptionsSnapshotRow.day_volume * 100).label("net_premium"),
                 func.sum(OptionsSnapshotRow.day_volume).label("total_volume"),
             )
             .where(
