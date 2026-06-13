@@ -63,14 +63,13 @@ def test_redact_war_room_guest_strips_sensitive_fields() -> None:
             {"title": "Second"},
             {"title": "Third"},
         ],
-        "trade_plan": ["plan a", "plan b"],
         "summary_zh": "x" * 200,
         "treasury_read": {"summary_zh": "y" * 100},
     }
     out = redact_war_room(payload, "guest")
     assert len(out["events"]) == 2
     assert "deep_dive_zh" not in out["events"][0]
-    assert out["trade_plan"] == []
+    assert "trade_plan" not in out
     assert len(out["summary_zh"]) <= 120
 
 
@@ -118,6 +117,7 @@ def test_war_room_guest_returns_tier_without_access_key(monkeypatch) -> None:
     body = resp.json()
     assert body["tier"] == "guest"
     assert "events" in body
+    assert "trade_plan" not in body
 
 
 def test_stock_options_guest_requires_login() -> None:
@@ -184,3 +184,4 @@ def test_war_room_pro_with_access_key_full_events(monkeypatch) -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["tier"] == "pro"
+    assert "trade_plan" not in resp.json()

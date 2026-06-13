@@ -43,7 +43,6 @@ def redact_war_room(payload: dict[str, Any], tier: MvpTier) -> dict[str, Any]:
                 item["impact_note_zh"] = "登录后查看完整解读"
                 trimmed.append(item)
             out["events"] = trimmed
-        out["trade_plan"] = []
         out["summary_zh"] = str(out.get("summary_zh") or "")[:120]
         treasury = out.get("treasury_read")
         if isinstance(treasury, dict):

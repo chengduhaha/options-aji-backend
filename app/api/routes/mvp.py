@@ -563,18 +563,6 @@ def _event_from_discord(row: Any) -> dict[str, Any]:
     )
 
 
-def _fallback_plan(events: list[dict[str, Any]], treasury: dict[str, Any]) -> list[str]:
-    plan: list[str] = []
-    if events:
-        plan.append(f"盘前主线先围绕「{events[0]['title']}」做情景推演，相关标的等待开盘后量价确认。")
-    else:
-        plan.append("盘前没有足够高置信事件，先以指数、VIX 和期权结构判断今天风险偏好。")
-    plan.append("开盘后等待 15-30 分钟确认 SPY/QQQ 是否同向放量，再决定是否进入个股。")
-    plan.append("期权只筛成交量、OI 和买卖价差都可接受的合约，不用低流动性深虚值表达方向。")
-    plan.append(str(treasury.get("summary_zh") or "国债曲线暂时只作为背景变量。"))
-    return plan
-
-
 def _five_minute_bucket_utc() -> str:
     """Align LLM cache expiry with MVP front-end refresh (every 5 minutes)."""
     now = datetime.now(timezone.utc)
@@ -603,7 +591,7 @@ def _llm_cache_key(
         ensure_ascii=False,
         sort_keys=True,
     )
-    return f"mvp:war-room:v5:{hash(raw)}"
+    return f"mvp:war-room:v6:{hash(raw)}"
 
 
 def _get_cached_war_room_llm(
@@ -675,8 +663,7 @@ def _call_war_room_llm(
         "\"impact_note_zh\":\"\","
         "\"impact_score\":0,\"related_assets\":[],\"watch_zh\":\"\","
         "\"deep_dive_zh\":\"\",\"trade_implications_zh\":\"\","
-        "\"scenario_zh\":\"\",\"risk_watch_zh\":\"\"}],"
-        "\"trade_plan\":[\"...\"],\"summary_zh\":\"...\"}。"
+        "\"scenario_zh\":\"\",\"risk_watch_zh\":\"\"}],\"summary_zh\":\"...\"}。"
         "impact 必须表示对 SPY/QQQ/美股大盘风险偏好的方向，不是单一商品涨跌本身。"
         "例：美油暴跌但地缘缓和、通胀预期降温，对大盘可标利好或中性，勿仅因油价跌标利空。"
         "impact_scope 表示事件主要作用域：equity_broad=大盘指数；oil_energy=原油/能源链；"
@@ -685,7 +672,7 @@ def _call_war_room_llm(
         "related_assets 填最相关 ticker（如 SPY、QQQ、USO、XLE、TLT）。"
         "deep_dive_zh 解释为什么这是真事件而不是噪音；trade_implications_zh 说明对正股/期权行动的影响；"
         "scenario_zh 给出利好/利空两种盘中确认路径；risk_watch_zh 给出失效条件和风险。"
-        "events 最多 5 条，trade_plan 最多 4 条；标题短，解读字段每条不超过 120 字。"
+        "events 最多 5 条；标题短，解读字段每条不超过 120 字。"
         "不得给确定收益承诺，不得编造价格。"
     )
     payload = {
@@ -883,19 +870,15 @@ def mvp_war_room(
         )
 
     events = [_localize_war_room_event(_normalize_war_room_event(e), loc) for e in discord_events[:8]]
-    trade_plan = _fallback_plan(events, treasury)
     summary = ""
     if isinstance(ai, dict):
         ai_events = ai.get("events")
-        ai_plan = ai.get("trade_plan")
         if isinstance(ai_events, list) and ai_events:
             events = [
                 _localize_war_room_event(_normalize_war_room_event(e), loc)
                 for e in ai_events
                 if isinstance(e, dict)
             ][:8]
-        if isinstance(ai_plan, list) and ai_plan:
-            trade_plan = [str(x) for x in ai_plan if str(x).strip()][:6]
         summary = str(ai.get("summary_zh") or "").strip()
 
     raw = {
@@ -903,7 +886,6 @@ def mvp_war_room(
         "source": "discord+treasury+llm" if ai else "discord+treasury+rules",
         "window_hours": hours,
         "events": events,
-        "trade_plan": trade_plan,
         "treasury_read": treasury,
         "summary_zh": summary,
         "data_quality": {

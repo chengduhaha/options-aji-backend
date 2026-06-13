@@ -158,7 +158,7 @@ Stripe 对 investment / trading / financial advice 类目极其敏感（属 Rest
 
 7. **数据合规**：隐私政策声明的「用户数据删除权」要有对应后端删除流程（GDPR/CCPA 友好），尤其面向美/欧用户。
 
-8. **内容门控措辞复核**：`mvp_entitlement.py` 裁剪的字段含 `trade_plan` / `trade_implications_zh` / `scenario_zh`。「交易计划 / 交易含义」措辞偏向投资建议，建议改为「情景推演 / 教育性解读 / 数据观察」等中性表达，与「非投顾」定位一致（详见 §4）。
+8. **内容门控措辞复核**：`mvp_entitlement.py` 裁剪的字段含 `trade_implications_zh` / `scenario_zh` / `risk_watch_zh`。「交易含义」等措辞偏向投资建议，建议改为「情景推演 / 教育性解读 / 数据观察」等中性表达，与「非投顾」定位一致（详见 §4）。
 
 ---
 
@@ -170,7 +170,7 @@ Stripe 对 investment / trading / financial advice 类目极其敏感（属 Rest
 
 2. **法务页缺失或死链**——`href="#"` 的 ToS/Privacy、零退款政策。审核机器直接判失败。**上线前必补 4 个页面。**
 
-3. **定位成投顾 / 荐股 / 信号服务**——名称或字段含 `signals` / `trade_plan` / 「荐股」/「代客」会被归入受限类目。全站口径统一为 **data & education, not investment advice, not a registered adviser, 不接触资金、不代下单**。
+3. **定位成投顾 / 荐股 / 信号服务**——名称或字段含 `signals` / 「交易计划」/ 「荐股」/「代客」会被归入受限类目。全站口径统一为 **data & education, not investment advice, not a registered adviser, 不接触资金、不代下单**。
 
 4. **主体信息不一致或缺失**——支付账户主体名 / 网站品牌 / 收款描述符 / 联系邮箱四者不一致或查无此人。补真实可达的 `support@` 邮箱与主体名称。
 
@@ -197,7 +197,7 @@ Stripe 对 investment / trading / financial advice 类目极其敏感（属 Rest
 
 - [ ] **权益源收敛**：统一 Stripe plan 与 `mvp_entitlement` tier，AccessKey 退为内部用途
 - [ ] 补 `payment_failed` / `past_due` 优雅降级
-- [ ] `trade_plan` 等字段措辞中性化
+- [ ] 持续复核事件解读字段，避免出现「交易计划」等投顾化措辞
 - [ ] 数据删除流程对齐隐私政策
 
 ---
