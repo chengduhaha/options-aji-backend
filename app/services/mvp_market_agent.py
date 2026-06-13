@@ -491,7 +491,7 @@ def _build_mvp_market_agent() -> Any:
 """
 
     if create_deep_agent is None:
-        from app.cross_market.copilot_supervisor import FallbackAgent
+        from app.services.fallback_agent import FallbackAgent
 
         agent = FallbackAgent(model=model, instructions=instructions)
         if should_cache_agent:

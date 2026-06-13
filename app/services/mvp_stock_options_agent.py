@@ -271,7 +271,7 @@ def _build_agent() -> Any:
 可引用内训教材（DTE、IV Rank、Expected Move、异动五步法）术语，仍须只输出上述 JSON。"""
 
     if create_deep_agent is None:
-        from app.cross_market.copilot_supervisor import FallbackAgent
+        from app.services.fallback_agent import FallbackAgent
 
         agent = FallbackAgent(model=model, instructions=instructions)
         if should_cache_agent:

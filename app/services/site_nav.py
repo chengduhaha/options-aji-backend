@@ -31,8 +31,6 @@ KNOWN_NAV_IDS: tuple[str, ...] = (
     "cross_market",
     "cross_scanner",
     "cross_feed",
-    "ontology_copilot",
-    "ontology_inspector",
 )
 
 NAV_GROUP_CHILDREN: dict[str, tuple[str, ...]] = {
@@ -41,8 +39,6 @@ NAV_GROUP_CHILDREN: dict[str, tuple[str, ...]] = {
         "cross_market",
         "cross_scanner",
         "cross_feed",
-        "ontology_copilot",
-        "ontology_inspector",
     ),
 }
 

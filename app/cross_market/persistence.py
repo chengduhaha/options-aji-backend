@@ -3,12 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cross_market.models import AgentTraceRecord, ArbitrageSignalRecord, EventSnapshotRecord
-from app.cross_market.trace_store import OntologyTrace
+from app.cross_market.models import ArbitrageSignalRecord, EventSnapshotRecord
 
 
 async def upsert_event_snapshots(session: AsyncSession, events: list[dict]) -> None:
@@ -85,38 +83,3 @@ async def replace_arbitrage_signals(session: AsyncSession, opportunities: list[d
         )
         await session.execute(stmt)
     await session.commit()
-
-
-async def save_trace_record(session: AsyncSession, trace: OntologyTrace) -> None:
-    stmt = insert(AgentTraceRecord).values(
-        trace_id=trace.trace_id,
-        source=trace.source,
-        query=trace.query,
-        matched_pattern=trace.matched_pattern,
-        used_objects=trace.used_objects,
-        used_relations=trace.used_relations,
-        created_at=datetime.fromisoformat(trace.created_at.replace("Z", "+00:00")),
-    )
-    stmt = stmt.on_conflict_do_nothing(index_elements=[AgentTraceRecord.trace_id])
-    await session.execute(stmt)
-    await session.commit()
-
-
-async def list_recent_trace_records(session: AsyncSession, limit: int) -> list[OntologyTrace]:
-    rows = await session.execute(
-        select(AgentTraceRecord).order_by(AgentTraceRecord.created_at.desc()).limit(limit)
-    )
-    output: list[OntologyTrace] = []
-    for row in rows.scalars().all():
-        output.append(
-            OntologyTrace(
-                trace_id=row.trace_id,
-                source=row.source,
-                query=row.query,
-                matched_pattern=row.matched_pattern,
-                used_objects=row.used_objects,
-                used_relations=row.used_relations,
-                created_at=row.created_at.isoformat(),
-            )
-        )
-    return output

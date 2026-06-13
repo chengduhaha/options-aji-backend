@@ -68,7 +68,7 @@ async def data_sources_probe(
         with sync_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             pg_ok = True
-            for tbl in ("event_snapshots", "arbitrage_signals", "agent_traces"):
+            for tbl in ("event_snapshots", "arbitrage_signals"):
                 try:
                     r = conn.execute(text(f"SELECT COUNT(*) FROM {tbl}"))
                     pg_counts[tbl] = int(r.scalar() or 0)
@@ -85,7 +85,7 @@ async def data_sources_probe(
         error_short=pg_err,
         records_or_rows=sum(pg_counts.values()) if pg_ok else None,
         sample_top_level_keys=list(pg_counts.keys()),
-        probe_description="SELECT 1; optional COUNT on ontology tables",
+        probe_description="SELECT 1; optional COUNT on cross-market snapshot tables",
     )
 
     redis_t0 = time.perf_counter()

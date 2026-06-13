@@ -29,7 +29,7 @@ dependencies = [
   # Interactive Brokers (optional live quotes)
   "ib-insync>=0.9.86",
 
-  # Ontology / Copilot agent
+  # DeepAgents (MVP market/stock insights agents)
   "deepagents>=0.0.10",
   "langgraph>=0.2.0",
   "jsonschema>=4.20.0",

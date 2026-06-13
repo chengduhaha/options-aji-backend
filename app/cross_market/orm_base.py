@@ -4,5 +4,5 @@ from __future__ import annotations
 from sqlalchemy.orm import DeclarativeBase
 
 
-class OntologyBase(DeclarativeBase):
+class CrossMarketBase(DeclarativeBase):
     pass

@@ -1,1 +1,1 @@
-"""Cross-market ontology stack: Polymarket fusion, IBKR live quotes, Copilot."""
+"""Cross-market stack: Polymarket fusion, IBKR live quotes."""

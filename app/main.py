@@ -21,7 +21,6 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
 from app.api.routes.congress import router as congress_router
-from app.api.routes.copilot_routes import router as copilot_router
 from app.api.routes.creem_billing import router as creem_billing_router
 from app.api.routes.discord_menu import router as discord_menu_router
 from app.api.routes.cross_market_core import router as cross_market_core_router
@@ -40,7 +39,6 @@ from app.api.routes.news import router as news_router
 from app.api.routes.mvp import router as mvp_router
 from app.api.routes.market_overview import router as market_overview_router
 from app.api.routes.market_dashboard import router as market_dashboard_router
-from app.api.routes.ontology_api import inspector_router, objects_router
 from app.api.routes.options import router as options_router
 from app.api.routes.profile import router as profile_router
 from app.api.routes.scanner import router as scanner_router
@@ -59,8 +57,7 @@ from app.ingest.discord_history_rest import run_discord_gap_sync_loop
 from app.ingest.feed_enrichment import run_feed_enrichment_loop
 from app.logging_setup import apply_noise_filters
 from app.sync.scheduler import start_scheduler, stop_scheduler
-from app.cross_market.db_async import create_ontology_tables, init_ontology_async_db
-from app.cross_market.ontology_registry import ontology
+from app.cross_market.db_async import create_cross_market_tables, init_cross_market_async_db
 from app.cross_market.redis_cache import ping_redis as cm_ping_redis
 from app.cross_market import ibkr_connection as ibkr_conn
 
@@ -110,19 +107,11 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     init_db()
 
-    init_ontology_async_db()
+    init_cross_market_async_db()
     try:
-        await create_ontology_tables()
+        await create_cross_market_tables()
     except Exception as exc:
-        logger.warning("ontology tables init: %s", exc)
-    try:
-        logger.info(
-            "ontology YAML: %s objects, %s patterns",
-            len(ontology.list_objects()),
-            len(ontology.list_patterns()),
-        )
-    except Exception as exc:
-        logger.warning("ontology registry: %s", exc)
+        logger.warning("cross-market tables init: %s", exc)
     try:
         cm_redis = await cm_ping_redis()
         logger.info("cross-market redis ping: %s", cm_redis)
@@ -264,12 +253,9 @@ def create_application() -> FastAPI:
     app.include_router(billing_router)
     app.include_router(creem_billing_router)
     app.include_router(agent_router)
-    app.include_router(copilot_router)
     app.include_router(ibkr_router)
     app.include_router(cross_market_core_router)
     app.include_router(cross_market_diag_router)
-    app.include_router(objects_router)
-    app.include_router(inspector_router)
     app.include_router(alerts_router)
     app.include_router(integration_router)
     # ── Macro / Market Overview (register before market_dashboard /{symbol} to avoid route hijacking) ──
