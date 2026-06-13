@@ -29,16 +29,14 @@ KNOWN_NAV_IDS: tuple[str, ...] = (
     "darkpool",
     "congress",
     "cross_market",
-    "cross_scanner",
-    "cross_feed",
+    "cross_xpoz",
 )
 
 NAV_GROUP_CHILDREN: dict[str, tuple[str, ...]] = {
     "alt_data": ("divergence", "darkpool", "congress"),
     "cross_market_group": (
         "cross_market",
-        "cross_scanner",
-        "cross_feed",
+        "cross_xpoz",
     ),
 }
 

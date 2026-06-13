@@ -78,12 +78,13 @@ def _mid_price(last: object, bid: object, ask: object) -> Optional[float]:
     return cand[0] if cand else None
 
 
-def _expected_moves_from_futu(symbol: str, spot: float) -> list[dict[str, object]]:
-    if spot <= 0:
-        return []
+def _futu_overview_chain(symbol: str) -> list[dict[str, object]]:
     payload = get_futu_client().get_option_chain_snapshot(symbol, limit=2500)
-    contracts = list(payload.get("contracts") or []) if isinstance(payload, dict) else []
-    if not contracts:
+    return list(payload.get("contracts") or []) if isinstance(payload, dict) else []
+
+
+def _expected_moves_from_futu_contracts(contracts: list[dict[str, object]], spot: float) -> list[dict[str, object]]:
+    if spot <= 0 or not contracts:
         return []
 
     by_exp: dict[str, list[dict[str, object]]] = {}
@@ -136,9 +137,13 @@ def _expected_moves_from_futu(symbol: str, spot: float) -> list[dict[str, object
     return out
 
 
-def _option_liquidity_from_futu(symbol: str) -> tuple[float, float, float, float]:
-    payload = get_futu_client().get_option_chain_snapshot(symbol, limit=2500)
-    contracts = list(payload.get("contracts") or []) if isinstance(payload, dict) else []
+def _expected_moves_from_futu(symbol: str, spot: float) -> list[dict[str, object]]:
+    if spot <= 0:
+        return []
+    return _expected_moves_from_futu_contracts(_futu_overview_chain(symbol), spot)
+
+
+def _option_liquidity_from_futu_contracts(contracts: list[dict[str, object]]) -> tuple[float, float, float, float]:
     if not contracts:
         return 0.0, 0.0, 0.0, 0.0
     by_exp: dict[str, list[dict[str, object]]] = {}
@@ -165,6 +170,10 @@ def _option_liquidity_from_futu(symbol: str) -> tuple[float, float, float, float
     return call_vol, put_vol, call_oi, put_oi
 
 
+def _option_liquidity_from_futu(symbol: str) -> tuple[float, float, float, float]:
+    return _option_liquidity_from_futu_contracts(_futu_overview_chain(symbol))
+
+
 def _overview_followups(sym: str, spot: float, hist: object) -> tuple[
     list[tuple[str, float]],
     dict[str, object],
@@ -179,8 +188,9 @@ def _overview_followups(sym: str, spot: float, hist: object) -> tuple[
     ohlc = _ohlc_from_hist(hist)
     cfg = get_settings()
     if getattr(cfg, "futu_enabled", False):
-        call_vol, put_vol, call_oi, put_oi = _option_liquidity_from_futu(sym)
-        expected_moves = _expected_moves_from_futu(sym, spot)
+        futu_contracts = _futu_overview_chain(sym)
+        call_vol, put_vol, call_oi, put_oi = _option_liquidity_from_futu_contracts(futu_contracts)
+        expected_moves = _expected_moves_from_futu_contracts(futu_contracts, spot)
     else:
         from app.tools.yf_helpers import yf_ticker
 

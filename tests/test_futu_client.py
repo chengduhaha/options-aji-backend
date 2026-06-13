@@ -7,6 +7,7 @@ class FakeQuoteContext:
     def __init__(self) -> None:
         self.closed = False
         self.snapshot_calls: list[list[str]] = []
+        self.option_chain_calls = 0
 
     def close(self) -> None:
         self.closed = True
@@ -57,6 +58,7 @@ class FakeQuoteContext:
         return 0, pd.DataFrame(rows)
 
     def get_option_chain(self, code: str, **kwargs):
+        self.option_chain_calls += 1
         assert code == "US.AAPL"
         assert kwargs["start"] == "2026-06-19"
         assert kwargs["end"] == "2026-06-19"
@@ -143,6 +145,22 @@ def test_get_option_chain_snapshot_merges_static_and_realtime_rows() -> None:
     assert first["implied_volatility"] == 0.245
     assert first["day_volume"] == 920
     assert first["open_interest"] == 1200
+
+
+def test_get_option_chain_snapshot_uses_short_ttl_cache() -> None:
+    import app.clients.futu_client as futu_mod
+    from app.clients.futu_client import FutuQuoteClient
+
+    futu_mod._chain_snapshot_cache.clear()
+    fake_ctx = FakeQuoteContext()
+    client = FutuQuoteClient(enabled=True, ctx_factory=lambda: fake_ctx)
+
+    first = client.get_option_chain_snapshot("AAPL", expiration_date="2026-06-19", limit=10)
+    second = client.get_option_chain_snapshot("AAPL", expiration_date="2026-06-19", limit=10)
+
+    assert first is second
+    assert fake_ctx.option_chain_calls == 1
+    assert len(fake_ctx.snapshot_calls) == 1
 
 
 def test_disabled_futu_client_returns_not_enabled() -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import math
 import socket
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
@@ -16,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 RET_OK = 0
 US_INDEX_SYMBOLS = frozenset({"DJI", "IXIC", "NDX", "RUT", "SPX", "VIX"})
+_CHAIN_SNAPSHOT_CACHE_TTL_SECONDS = 20.0
+_chain_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_chain_snapshot_cache_lock = threading.Lock()
 
 
 def normalize_futu_us_code(symbol: str) -> str:
@@ -308,6 +313,16 @@ class FutuQuoteClient:
         if not self.enabled:
             return {"symbol": display_symbol, "contracts": [], "error": "futu_not_enabled"}
 
+        cache_key = (
+            f"{display_symbol}|{expiration_date or ''}|{contract_type or ''}|"
+            f"{strike_price_gte}|{strike_price_lte}|{limit}"
+        )
+        now = time.monotonic()
+        with _chain_snapshot_cache_lock:
+            cached = _chain_snapshot_cache.get(cache_key)
+            if cached and now - cached[0] < _CHAIN_SNAPSHOT_CACHE_TTL_SECONDS:
+                return cached[1]
+
         futu_code = normalize_futu_us_code(symbol)
         start_date, end_date = _default_chain_dates(expiration_date)
         try:
@@ -327,7 +342,8 @@ class FutuQuoteClient:
             snapshot_rows = self.get_market_snapshot_rows(option_codes)
         except Exception as exc:
             logger.warning("Futu options chain failed %s: %s", symbol, exc)
-            return {"symbol": display_symbol, "contracts": [], "error": f"futu_options_failed: {exc}"}
+            result = {"symbol": display_symbol, "contracts": [], "error": f"futu_options_failed: {exc}"}
+            return result
 
         static_by_code = {str(row.get("code")): row for row in filtered_chain_rows if row.get("code")}
         contracts = [
@@ -336,7 +352,7 @@ class FutuQuoteClient:
         ]
         contracts = [contract for contract in contracts if contract.get("ticker")]
         expirations = sorted({str(contract["expiration_date"]) for contract in contracts if contract.get("expiration_date")})
-        return {
+        result = {
             "symbol": display_symbol,
             "source": "futu",
             "count": len(contracts),
@@ -344,6 +360,9 @@ class FutuQuoteClient:
             "contracts": contracts,
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
+        with _chain_snapshot_cache_lock:
+            _chain_snapshot_cache[cache_key] = (now, result)
+        return result
 
     def get_market_snapshot_rows(self, code_list: list[str]) -> list[dict[str, Any]]:
         if not code_list:

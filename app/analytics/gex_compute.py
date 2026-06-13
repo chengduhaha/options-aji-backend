@@ -105,25 +105,40 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
 
     cfg = get_settings()
     if getattr(cfg, "futu_enabled", False):
+        futu_fail_reason = "unknown"
         try:
             futu = get_futu_client()
             quote = futu.get_stock_quote(guard)
             spot_raw = quote.get("last_price") if isinstance(quote, dict) else None
-            if isinstance(spot_raw, (int, float)) and float(spot_raw) > 0:
+            if not (isinstance(spot_raw, (int, float)) and float(spot_raw) > 0):
+                futu_fail_reason = f"quote_unusable:{quote.get('error') if isinstance(quote, dict) else 'no_quote'}"
+            else:
                 chain = futu.get_option_chain_snapshot(guard, limit=2000)
+                chain_err = chain.get("error") if isinstance(chain, dict) else None
                 contracts = chain.get("contracts") if isinstance(chain, dict) else None
-                if isinstance(contracts, list) and contracts:
+                if chain_err:
+                    futu_fail_reason = f"chain_error:{chain_err}"
+                elif not isinstance(contracts, list) or not contracts:
+                    futu_fail_reason = "chain_empty"
+                else:
                     out = compute_gex_profile_from_contracts(
                         guard,
                         contracts=contracts,
                         spot=float(spot_raw),
                     )
-                    if not out.get("error"):
+                    if out.get("error"):
+                        futu_fail_reason = f"gex_compute:{out.get('error')}"
+                    else:
                         out["spotSource"] = "futu_quote"
                         return out
         except Exception as exc:
+            futu_fail_reason = f"exception:{exc}"
             logger.warning("compute_gex_profile futu(%s): %s", guard, exc)
-        return {"symbol": guard, "error": "futu_gex_failed"}
+        logger.info(
+            "compute_gex_profile futu unavailable for %s (%s) — falling back to yfinance",
+            guard,
+            futu_fail_reason,
+        )
 
     try:
         t = yf_ticker(guard)

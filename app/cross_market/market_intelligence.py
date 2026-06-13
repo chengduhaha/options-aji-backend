@@ -6,8 +6,6 @@ import logging
 import re
 
 from app.clients.fmp_client import get_fmp_client
-from app.cross_market import ibkr_connection as ibkr_conn
-from app.cross_market.ibkr_client import aggregate_option_volumes_cp_ratio_ibkr
 from app.cross_market.massive_utils import get_options_chain_results
 from app.cross_market.xpoz_client import XpozClient
 
@@ -181,14 +179,6 @@ def get_polymarket_probability(market: dict) -> float:
 async def infer_options_probability(ticker: str | None) -> float:
     if not ticker:
         return 0.5
-    if ibkr_conn.ibkr_is_enabled():
-        try:
-            await ibkr_conn.ibkr_ensure_connected()
-            if ibkr_conn.ibkr_is_connected():
-                _cv, _pv, share = await aggregate_option_volumes_cp_ratio_ibkr(ticker)
-                return clamp01(share)
-        except Exception:
-            logger.debug("options inference (IBKR) fallback for %s", ticker, exc_info=True)
 
     chain = await get_options_chain_results(ticker)
     try:

@@ -1,8 +1,7 @@
-"""Cross-market: quote, US-equity Polymarket hotspots, feed."""
+"""Cross-market: Polymarket + Xpoz US-equity hotspots (independent feeds)."""
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import re
 
@@ -16,6 +15,7 @@ from app.cross_market.db_async import SessionLocal as CrossMarketSessionLocal
 from app.cross_market.persistence import upsert_event_snapshots
 from app.cross_market.polymarket_client import PolymarketClient
 from app.cross_market.us_equity_markets import fetch_us_equity_markets, market_to_hot_fields
+from app.cross_market.xpoz_us_hot import XpozHotResponse, fetch_xpoz_us_hot
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +139,9 @@ async def _load_us_equity_hot_events(limit: int) -> list[HotEventItem]:
 
 
 @router.get("/events/hot", response_model=HotEventsResponse)
+@router.get("/polymarket/hot", response_model=HotEventsResponse)
 async def get_events_hot(
-    limit: int = Query(default=12, ge=1, le=30),
+    limit: int = Query(default=20, ge=1, le=30),
 ) -> HotEventsResponse:
     events = await _load_us_equity_hot_events(limit)
 
@@ -153,86 +154,8 @@ async def get_events_hot(
     return HotEventsResponse(events=events)
 
 
-class ArbitrageOpportunity(BaseModel):
-    """Legacy scanner row — now PM-only US equity hotspot (no cross-source divergence)."""
-
-    event_id: str
-    question: str
-    polymarket_probability: float = Field(ge=0, le=1)
-    related_ticker: str | None = None
-    volume_24h: float | None = None
-    liquidity: float | None = None
-    slug: str | None = None
-    event_type: str = "equity"
-
-
-class ArbitrageScanResponse(BaseModel):
-    opportunities: list[ArbitrageOpportunity]
-
-
-@router.get("/scanner/arbitrage", response_model=ArbitrageScanResponse)
-async def scan_arbitrage_cross(
-    limit: int = Query(default=20, ge=1, le=30),
-) -> ArbitrageScanResponse:
-    """US-equity Polymarket markets sorted by volume (no divergence scan)."""
-    hot = await _load_us_equity_hot_events(limit)
-    opportunities = [
-        ArbitrageOpportunity(
-            event_id=item.event_id.replace("Event:polymarket-", "Event:poly-"),
-            question=item.title_zh,
-            polymarket_probability=item.polymarket_probability,
-            related_ticker=item.related_ticker,
-            volume_24h=item.volume_24h,
-            liquidity=item.liquidity,
-            slug=item.slug,
-            event_type=item.event_type,
-        )
-        for item in hot
-    ]
-    return ArbitrageScanResponse(opportunities=opportunities)
-
-
-class FeedItem(BaseModel):
-    item_id: str
-    kind: str
-    source: str
-    timestamp: str
-    title: str
-    sentiment: str
-    urgency: str
-    affected_tickers: list[str]
-    ai_summary_zh: str
-
-
-class FeedResponse(BaseModel):
-    items: list[FeedItem]
-
-
-@router.get("/feed", response_model=FeedResponse)
-async def cross_market_feed() -> FeedResponse:
-    now = dt.datetime.now(tz=dt.timezone.utc).isoformat()
-    events = await _load_us_equity_hot_events(15)
-
-    items: list[FeedItem] = []
-    for event in events:
-        tickers = [event.related_ticker] if event.related_ticker else []
-        pm_pct = event.polymarket_probability * 100
-        vol_hint = f"，24h 成交 {event.volume_24h:,.0f}" if event.volume_24h else ""
-        ticker_hint = f"关联标的 {event.related_ticker}" if event.related_ticker else "宏观/主题市场"
-        items.append(
-            FeedItem(
-                item_id=f"feed-event-{event.event_id}",
-                kind="event",
-                source="Polymarket",
-                timestamp=now,
-                title=event.title_zh,
-                sentiment="bullish" if event.polymarket_probability > 0.55 else "neutral",
-                urgency="important" if (event.volume_24h or 0) > 50_000 else "normal",
-                affected_tickers=tickers,
-                ai_summary_zh=(
-                    f"预测市场 Yes 概率 {pm_pct:.1f}%{vol_hint}。{ticker_hint}。"
-                ),
-            )
-        )
-
-    return FeedResponse(items=items[:20])
+@router.get("/xpoz/hot", response_model=XpozHotResponse)
+async def get_xpoz_hot(
+    limit: int = Query(default=15, ge=1, le=30),
+) -> XpozHotResponse:
+    return await fetch_xpoz_us_hot(limit=limit)

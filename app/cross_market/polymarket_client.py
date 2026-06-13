@@ -40,6 +40,28 @@ class PolymarketClient:
         await cache_set_json(cache_key, payload, ttl_seconds=60)
         return payload
 
+    async def public_search_events(
+        self,
+        query: str,
+        *,
+        limit_per_type: int = 8,
+    ) -> list[dict]:
+        """Search events via Gamma `/public-search` (the `/markets?q=` param does not filter)."""
+        cache_key = f"cm:poly:search:{query}:{limit_per_type}"
+        cached = await cache_get_json(cache_key)
+        if cached is not None:
+            return cached
+        response = await self.client.get(
+            "/public-search",
+            params={"q": query, "limit_per_type": limit_per_type},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        events = payload.get("events") if isinstance(payload, dict) else None
+        rows = events if isinstance(events, list) else []
+        await cache_set_json(cache_key, rows, ttl_seconds=120)
+        return rows
+
     async def get_market(self, market_id: str) -> dict:
         cache_key = f"cm:poly:market:{market_id}"
         cached = await cache_get_json(cache_key)
