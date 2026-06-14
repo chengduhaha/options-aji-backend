@@ -21,7 +21,7 @@ from app.clients.futu_client import get_futu_client
 from app.clients.massive_client import get_massive_client
 from app.config import get_settings
 from app.db.models import OptionsSnapshotRow
-from app.db.session import db_session_dep
+from app.db.session import SessionLocal, db_session_dep
 from app.services.cache_service import (
     TTL_HOT, cache_get, cache_set,
     key_options_chain, key_gex,
@@ -36,6 +36,45 @@ def _query_default(value, fallback):
     if value.__class__.__module__ == "fastapi.params" and hasattr(value, "default"):
         return fallback if value.default is None else value.default
     return value
+
+
+def _compute_gex_profile_from_db(sym: str, *, limit: int) -> dict[str, object] | None:
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(OptionsSnapshotRow)
+            .where(OptionsSnapshotRow.underlying_ticker == sym)
+            .where(OptionsSnapshotRow.open_interest > 0)
+            .order_by(OptionsSnapshotRow.day_volume.desc())
+            .limit(limit)
+        ).scalars().all()
+    if not rows:
+        return None
+    spot = 0.0
+    contracts: list[dict[str, object]] = []
+    for row in rows:
+        if spot <= 0 and isinstance(getattr(row, "underlying_price", None), (int, float)):
+            spot = float(row.underlying_price)
+        exp = getattr(row, "expiration_date", None)
+        contracts.append(
+            {
+                "ticker": getattr(row, "ticker", None),
+                "underlying": getattr(row, "underlying_ticker", sym),
+                "contract_type": getattr(row, "contract_type", None),
+                "expiration_date": str(exp) if exp else None,
+                "strike_price": getattr(row, "strike_price", None),
+                "gamma": getattr(row, "gamma", None),
+                "open_interest": getattr(row, "open_interest", None),
+                "implied_volatility": getattr(row, "implied_volatility", None),
+            }
+        )
+    if spot <= 0:
+        return None
+    result = compute_gex_profile_from_contracts(sym, contracts=contracts, spot=spot)
+    if result.get("error"):
+        return None
+    result["source"] = "database_gamma_estimate"
+    result["spotSource"] = "options_snapshots"
+    return result
 
 
 @router.get("/chain/{symbol}")
@@ -69,7 +108,13 @@ def get_options_chain(
         cache_suffix += f":spotwin{strike_window_pct}"
     cache_key = key_options_chain(sym, expiration_date or "") + cache_suffix
 
-    if getattr(cfg, "futu_enabled", False):
+    # Non-realtime page loads should stay cache/DB-first. Live Futu calls are
+    # comparatively slow and can saturate the single API worker under fan-out.
+    cached = None if realtime else cache_get(cache_key)
+    if cached:
+        return cached
+
+    if realtime and getattr(cfg, "futu_enabled", False):
         try:
             futu = get_futu_client()
             futu_strike_min = strike_min
@@ -93,11 +138,6 @@ def get_options_chain(
                 return result
         except Exception as exc:
             logger.warning("Futu options chain failed for %s: %s", sym, exc)
-
-    # Try Redis cache first
-    cached = None if realtime else cache_get(cache_key)
-    if cached:
-        return cached
 
     # Try DB (populated by sync pipeline)
     query = select(OptionsSnapshotRow).where(OptionsSnapshotRow.underlying_ticker == sym)
@@ -316,7 +356,9 @@ def get_gex(
             record_gex_snapshot(sym, dict(cached))
         return cached
 
-    result = compute_gex_profile(sym)
+    result = _compute_gex_profile_from_db(sym, limit=limit)
+    if result is None:
+        result = compute_gex_profile(sym)
     if not result.get("error"):
         cache_set(key_gex(sym), result, ttl=TTL_HOT)
         record_gex_snapshot(sym, dict(result))

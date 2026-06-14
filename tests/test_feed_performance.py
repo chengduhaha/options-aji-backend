@@ -253,3 +253,43 @@ def test_smart_vs_retail_route_uses_cache(monkeypatch) -> None:
 
     assert first == second
     assert calls == {"smart": 1}
+
+
+def test_smart_vs_retail_institutional_strength_reads_db_not_live_toolkit(monkeypatch) -> None:
+    import app.services.social_sentiment as svc
+
+    class Row:
+        day_volume = 1200
+        open_interest = 100
+        midpoint = 2.5
+
+    class Scalars:
+        def all(self):
+            return [Row()]
+
+    class Result:
+        def scalars(self):
+            return Scalars()
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return Result()
+
+    class ForbiddenToolkit:
+        def get_option_chain_full(self, *_args, **_kwargs):
+            raise AssertionError("smart-vs-retail should use local snapshots, not live option chains")
+
+    monkeypatch.setattr(svc, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(svc, "build_default_toolkit", lambda: ForbiddenToolkit(), raising=False)
+
+    unusual_count, strength, premium_flow = svc._estimate_institutional_strength("SPY")
+
+    assert unusual_count == 1
+    assert strength == 0
+    assert premium_flow == 300000.0

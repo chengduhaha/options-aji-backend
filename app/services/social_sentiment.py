@@ -13,8 +13,7 @@ from sqlalchemy import select, tuple_
 
 from app.api.routes.market_dashboard import WATCHLIST_MOVER
 from app.config import get_settings
-from app.tools.openbb_tools import build_default_toolkit
-from app.db.models import ResonanceSignalRow, SocialPostRow, TickerSentimentSnapshotRow
+from app.db.models import OptionsSnapshotRow, ResonanceSignalRow, SocialPostRow, TickerSentimentSnapshotRow
 from app.db.session import SessionLocal
 from app.services.kol_handles import parse_kol_handles_csv
 
@@ -296,26 +295,32 @@ def _xpoz_breaker_record_failure(cooldown_seconds: int) -> None:
 
 
 def _estimate_institutional_strength(symbol: str) -> tuple[int, int, float]:
-    toolkit = build_default_toolkit()
-    chain = toolkit.get_option_chain_full(symbol)
-    if not isinstance(chain, dict):
-        return 0, 0, 0.0
     unusual_count = 0
     premium_flow = 0.0
-    for key in ("calls", "puts"):
-        contracts = chain.get(key)
-        if not isinstance(contracts, list):
-            continue
-        for raw in contracts:
-            if not isinstance(raw, dict):
-                continue
-            volume = float(raw.get("volume") or 0)
-            oi = float(raw.get("openInterest") or 0)
-            mid = float(raw.get("midpoint") or 0)
-            ratio = volume / max(oi, 1.0)
-            if volume >= 300 and ratio >= 3.0:
-                unusual_count += 1
-                premium_flow += volume * max(mid, 0) * 100
+    sym = symbol.strip().upper()
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(OptionsSnapshotRow)
+            .where(OptionsSnapshotRow.underlying_ticker == sym)
+            .where(OptionsSnapshotRow.day_volume >= 300)
+            .where(OptionsSnapshotRow.open_interest > 0)
+            .order_by(OptionsSnapshotRow.day_volume.desc())
+            .limit(1000)
+        ).scalars().all()
+    for raw in rows:
+        volume = float(getattr(raw, "day_volume", 0) or 0)
+        oi = float(getattr(raw, "open_interest", 0) or 0)
+        mid_raw = getattr(raw, "midpoint", None)
+        if mid_raw is None:
+            bid = getattr(raw, "bid", None)
+            ask = getattr(raw, "ask", None)
+            if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and ask >= bid:
+                mid_raw = (float(bid) + float(ask)) / 2.0
+        mid = float(mid_raw or 0)
+        ratio = volume / max(oi, 1.0)
+        if volume >= 300 and ratio >= 3.0:
+            unusual_count += 1
+            premium_flow += volume * max(mid, 0) * 100
     strength = min(5, unusual_count // 2)
     return unusual_count, strength, round(premium_flow, 2)
 
