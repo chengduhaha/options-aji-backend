@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.cross_market.redis_cache import cache_get_json, cache_set_json
-from app.services.social_sentiment import SocialPostPayload, _fetch_xpoz_sentiment
+from app.services.social_sentiment import SocialPostPayload, _fallback_social, _fetch_xpoz_sentiment
 
 logger = logging.getLogger(__name__)
 _CACHE_TTL = 900
+_PER_SYMBOL_TIMEOUT_SECONDS = 1.5
 
 
 class SocialPostItem(BaseModel):
@@ -70,16 +72,28 @@ async def fetch_xpoz_ticker_detail(symbol: str) -> XpozTickerDetailResponse:
         return XpozTickerDetailResponse(symbol=sym, generated_at_utc=now, configured=False)
 
     cache_key = f"xpoz:ticker_detail:v1:{sym}"
-    if cached := cache_get_json(cache_key):
+    if cached := await cache_get_json(cache_key):
         try:
             return XpozTickerDetailResponse.model_validate(cached)
         except Exception:
             logger.debug("xpoz ticker detail cache invalid symbol=%s", sym)
 
-    result = _fetch_xpoz_sentiment(sym)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_xpoz_sentiment, sym),
+            timeout=_PER_SYMBOL_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.info("xpoz ticker detail fetch timed out for %s; using fallback", sym)
+        result = _fallback_social(sym)
+    except Exception:
+        logger.debug("xpoz ticker detail fetch failed for %s; using fallback", sym, exc_info=True)
+        result = _fallback_social(sym)
+    if result is None:
+        result = _fallback_social(sym)
     if result is None:
         payload = XpozTickerDetailResponse(symbol=sym, generated_at_utc=now, configured=True)
-        cache_set_json(cache_key, payload.model_dump(), ttl_seconds=_CACHE_TTL)
+        await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=_CACHE_TTL)
         return payload
 
     breakdown = result.source_breakdown or {}
@@ -96,5 +110,5 @@ async def fetch_xpoz_ticker_detail(symbol: str) -> XpozTickerDetailResponse:
         reddit_mentions=int(breakdown.get("reddit") or 0),
         posts=[_post_to_item(p) for p in posts[:80]],
     )
-    cache_set_json(cache_key, payload.model_dump(), ttl_seconds=_CACHE_TTL)
+    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=_CACHE_TTL)
     return payload
