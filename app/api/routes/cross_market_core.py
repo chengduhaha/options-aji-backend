@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.cross_market.db_async import SessionLocal as CrossMarketSessionLocal
 from app.cross_market.persistence import upsert_event_snapshots
 from app.cross_market.polymarket_client import PolymarketClient
+from app.cross_market.title_translation import resolve_title_zh
 from app.cross_market.us_equity_markets import fetch_us_equity_markets, market_to_hot_fields
 from app.cross_market.xpoz_ticker_detail import XpozTickerDetailResponse, fetch_xpoz_ticker_detail
 from app.cross_market.xpoz_us_hot import XpozHotResponse, fetch_xpoz_us_hot
@@ -104,6 +105,7 @@ async def cross_market_quote(symbol: str) -> MarketQuoteResponse:
 
 class HotEventItem(BaseModel):
     event_id: str
+    title_en: str
     title_zh: str
     event_type: str
     event_time: str
@@ -126,11 +128,23 @@ async def _load_us_equity_hot_events(limit: int) -> list[HotEventItem]:
         markets = await fetch_us_equity_markets(client, limit=limit)
         for market in markets:
             market_id = str(market.get("id") or "unknown")
+            event_id = f"Event:polymarket-{market_id}"
             fields = market_to_hot_fields(market)
+            title_en = str(fields.get("title_en") or fields.get("title_zh") or "未知事件")
+            title_zh = await asyncio.to_thread(resolve_title_zh, event_id, title_en)
             events.append(
                 HotEventItem(
-                    event_id=f"Event:polymarket-{market_id}",
-                    **fields,
+                    event_id=event_id,
+                    title_en=title_en,
+                    title_zh=title_zh,
+                    event_type=str(fields["event_type"]),
+                    event_time=str(fields["event_time"]),
+                    polymarket_probability=float(fields["polymarket_probability"]),
+                    related_ticker=fields.get("related_ticker"),
+                    related_tickers=list(fields.get("related_tickers") or []),
+                    volume_24h=fields.get("volume_24h"),
+                    liquidity=fields.get("liquidity"),
+                    slug=fields.get("slug"),
                 )
             )
     except Exception:

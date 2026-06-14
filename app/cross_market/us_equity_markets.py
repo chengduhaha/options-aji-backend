@@ -195,6 +195,7 @@ def market_to_hot_fields(market: dict[str, Any]) -> dict[str, Any]:
         liq = 0.0
 
     return {
+        "title_en": question,
         "title_zh": question,
         "event_type": event_type,
         "event_time": str(market.get("endDate") or ""),

@@ -267,7 +267,9 @@ def market_overview(
             return out
 
     if not refresh:
-        if cfg.redis_enabled and _should_schedule_overview_warm():
+        if not cfg.redis_enabled:
+            return _build_market_overview_payload()
+        if _should_schedule_overview_warm():
             background_tasks.add_task(_warm_market_overview_blocking)
         return _fallback_market_overview()
 

@@ -133,6 +133,14 @@ def key_stock_quote(symbol: str) -> str:
 def key_stock_overview(symbol: str) -> str:
     return f"stock:overview:{symbol.upper()}"
 
+
+def key_stock_volatility(symbol: str) -> str:
+    return f"stock:volatility:{symbol.upper()}"
+
+
+def key_stock_unusual_v2(symbol: str, query_hash: str) -> str:
+    return f"stock:unusual-v2:{symbol.upper()}:{query_hash}"
+
 def key_market_sectors() -> str:
     return "market:sectors"
 

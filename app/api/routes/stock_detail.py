@@ -27,7 +27,7 @@ from app.clients.futu_client import get_futu_client
 from app.config import get_settings
 from app.db.models import OptionsSnapshotRow
 from app.db.session import db_session_dep
-from app.services.cache_service import TTL_HOT, cache_get, cache_set, key_stock_overview
+from app.services.cache_service import TTL_HOT, cache_get, cache_set, key_gex, key_stock_overview, key_stock_unusual_v2, key_stock_volatility
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -436,6 +436,11 @@ async def stock_volatility(
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
     sym = symbol.strip().upper()
+    vol_key = key_stock_volatility(sym)
+    if cached := cache_get(vol_key):
+        if isinstance(cached, dict):
+            return cached
+
     (hv_series, hv_meta), (bar, term, skew) = await asyncio.gather(
         asyncio.to_thread(hv_series_and_current, sym),
         asyncio.to_thread(_volatility_bar_term_skew, sym),
@@ -447,7 +452,7 @@ async def stock_volatility(
         hv_series_pct=hv_vals,
     )
 
-    return {
+    result = {
         "symbol": sym,
         "ivVsHv": {"points": [{"date": d, "hv20": v} for d, v in hv_series[-260:]], "hvMeta": hv_meta},
         "gauges": {
@@ -460,6 +465,8 @@ async def stock_volatility(
         "skew": skew[:60],
         "bar": bar,
     }
+    cache_set(vol_key, result, ttl=TTL_HOT)
+    return result
 
 
 @router.get("/{symbol}/unusual")
@@ -526,6 +533,12 @@ def stock_unusual_v2(
     if sort_by not in ("score", "estimated_flow", "volume", "strike"):
         sort_by = "score"
     descending = order.lower() != "asc"
+    cache_suffix = f"{min_score}:{sort_by}:{order}:{page}:{page_size}"
+    unusual_key = key_stock_unusual_v2(sym, cache_suffix)
+    if cached := cache_get(unusual_key):
+        if isinstance(cached, dict):
+            return cached
+
     data_source = "database_snapshots"
 
     rows = db.execute(
@@ -560,7 +573,7 @@ def stock_unusual_v2(
     total = len(scored)
     start_idx = max((page - 1), 0) * page_size
     page_rows = scored[start_idx : start_idx + page_size]
-    return {
+    payload = {
         "symbol": sym,
         "source": data_source,
         "total": total,
@@ -570,6 +583,8 @@ def stock_unusual_v2(
         "order": "desc" if descending else "asc",
         "items": page_rows,
     }
+    cache_set(unusual_key, payload, ttl=300)
+    return payload
 
 
 @router.get("/{symbol}/gex")
@@ -577,9 +592,20 @@ def stock_gex(
     symbol: str,
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
+    from app.api.routes.options import _compute_gex_profile_from_db
+
     sym = symbol.strip().upper()
-    tk = build_default_toolkit()
-    out = tk.get_gex(sym)
-    if isinstance(out, dict) and isinstance(out.get("netGex"), (int, float)):
-        record_gex_snapshot(sym, out)
-    return out
+    cached = cache_get(key_gex(sym))
+    if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):
+        return cached
+
+    result = _compute_gex_profile_from_db(sym, limit=500)
+    if result is None:
+        tk = build_default_toolkit()
+        result = tk.get_gex(sym)
+    elif not result.get("error"):
+        cache_set(key_gex(sym), result, ttl=TTL_HOT)
+
+    if isinstance(result, dict) and isinstance(result.get("netGex"), (int, float)):
+        record_gex_snapshot(sym, result)
+    return result

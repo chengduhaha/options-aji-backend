@@ -220,3 +220,51 @@ def sync_options_chain_pipeline() -> None:
         len(symbols),
         total_upserted,
     )
+
+
+def run_sp500_options_sync(*, full: bool = False, batch_size: int = 50) -> dict[str, object]:
+    """Manual/admin trigger for S&P 500 options snapshot sync."""
+    cfg = get_settings()
+    use_futu_background = bool(
+        cfg.futu_enabled and getattr(cfg, "futu_background_options_sync_enabled", False)
+    )
+    if not use_futu_background and not cfg.massive_api_key:
+        return {"error": "no_options_source", "message": "Massive 或 Futu 期权源未启用"}
+
+    from app.sync.sp500_symbols import load_sp500_symbols, next_sp500_batch
+
+    if full and cfg.fmp_api_key:
+        symbols = load_sp500_symbols()
+        scope = "sp500_full"
+    elif cfg.sync_sp500_enabled and cfg.fmp_api_key:
+        symbols = next_sp500_batch(max(1, batch_size))
+        scope = "sp500_batch"
+    else:
+        symbols = list(cfg.sync_watchlist_symbols)
+        scope = "watchlist"
+
+    massive_client = get_massive_client() if cfg.massive_api_key else None
+    futu_client = get_futu_client() if use_futu_background else None
+    session = SessionLocal()
+    total_upserted = 0
+    try:
+        for symbol in symbols:
+            try:
+                total_upserted += _sync_symbol_options(
+                    session,
+                    symbol,
+                    massive_client=massive_client,
+                    futu_client=futu_client,
+                    cfg=cfg,
+                )
+            except Exception as exc:
+                session.rollback()
+                logger.warning("Options chain sync failed for %s: %s", symbol, exc)
+    finally:
+        session.close()
+
+    return {
+        "scope": scope,
+        "symbol_count": len(symbols),
+        "total_upserted": total_upserted,
+    }

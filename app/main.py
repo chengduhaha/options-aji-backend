@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.agent import router as agent_router
 from app.api.routes.access_keys import router as access_keys_router
+from app.api.routes.admin_sync import router as admin_sync_router
 from app.api.routes.admin_usage import router as admin_usage_router
 from app.api.routes.alerts import router as alerts_router
 from app.api.routes.analyst import router as analyst_router
@@ -248,6 +249,7 @@ def create_application() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(access_keys_router)
     app.include_router(admin_usage_router)
+    app.include_router(admin_sync_router)
     app.include_router(site_nav_router)
     app.include_router(discord_menu_router)
     app.include_router(billing_router)
