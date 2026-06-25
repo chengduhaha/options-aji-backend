@@ -59,8 +59,12 @@ class FMPClient:
                 resp.raise_for_status()
                 return resp.json()
             except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if 400 <= status < 500 and status != 429:
+                    logger.warning("FMP HTTP %s %s: %s", status, path, exc.response.text[:200])
+                    return None
                 if attempt == retries:
-                    logger.warning("FMP HTTP %s %s: %s", exc.response.status_code, path, exc.response.text[:200])
+                    logger.warning("FMP HTTP %s %s: %s", status, path, exc.response.text[:200])
                     return None
             except Exception as exc:
                 if attempt == retries:

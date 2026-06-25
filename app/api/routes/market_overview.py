@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
+from app.analytics.market_hours import get_us_market_session
 from app.clients.fmp_client import get_fmp_client
 from app.config import get_settings
 from app.services.cache_service import (
@@ -76,17 +77,31 @@ def get_actives():
     return result
 
 
+def _local_market_hours_payload() -> dict[str, object]:
+    session, label = get_us_market_session()
+    is_open = session == "regular"
+    return {
+        "isTheStockMarketOpen": is_open,
+        "session": session,
+        "sessionLabel": label,
+        "source": "local",
+    }
+
+
 @router.get("/hours")
 def get_market_hours():
     cached = cache_get(key_market_open())
     if cached:
         return cached
     cfg = get_settings()
-    if not cfg.fmp_api_key:
-        return {"isTheStockMarketOpen": None}
-    data = get_fmp_client().get_market_hours() or {}
-    cache_set(key_market_open(), data, ttl=60)
-    return data
+    if cfg.fmp_api_key:
+        data = get_fmp_client().get_market_hours()
+        if data:
+            cache_set(key_market_open(), data, ttl=60)
+            return data
+    payload = _local_market_hours_payload()
+    cache_set(key_market_open(), payload, ttl=60)
+    return payload
 
 
 @router.get("/indices")
