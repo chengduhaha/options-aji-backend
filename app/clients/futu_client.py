@@ -592,7 +592,13 @@ class FutuQuoteClient:
             vol_oi = round(volume / oi, 4)
 
         expiry_raw = _clean_value(row.get("strike_date"))
-        expiry = str(expiry_raw)[:10] if expiry_raw else None
+        expiry = None
+        if expiry_raw:
+            raw_exp = str(expiry_raw).strip()
+            if len(raw_exp) == 8 and raw_exp.isdigit():
+                expiry = f"{raw_exp[:4]}-{raw_exp[4:6]}-{raw_exp[6:8]}"
+            else:
+                expiry = raw_exp[:10]
         left_day = _safe_int(row.get("left_day"))
 
         iv_raw = _safe_float(row.get("implied_volatility"))
