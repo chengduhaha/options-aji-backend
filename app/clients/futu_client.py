@@ -468,6 +468,7 @@ class FutuQuoteClient:
 
         return {
             "ticker": ticker,
+            "code": ticker,
             "underlying": display_symbol_from_futu_code(owner),
             "contract_type": contract_type,
             "expiration_date": expiration,
@@ -498,6 +499,131 @@ class FutuQuoteClient:
             "last_trade_size": None,
             "last_trade_at": None,
             "snapshot_time": datetime.now(timezone.utc),
+        }
+
+
+    def get_option_screen_leaderboard(
+        self,
+        *,
+        vol_oi_min: float = 3.0,
+        volume_min: int = 500,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Fetch top unusual US stock options via Futu get_option_screen."""
+        if not self.enabled:
+            return {"contracts": [], "universe_count": 0, "error": "futu_not_enabled"}
+
+        capped_limit = max(1, min(int(limit), 200))
+        started = time.monotonic()
+        context = self._new_context()
+        try:
+            from futu import OptIndicator, OptMarketCategory, OptionScreenRequest, RET_OK
+
+            request = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
+            request.add_option_filter(OptIndicator.VOL_OI_RATIO, lower=float(vol_oi_min))
+            request.add_option_filter(OptIndicator.VOLUME, lower=int(volume_min))
+            request.add_sort(OptIndicator.VOL_OI_RATIO, desc=True)
+            request.page_from = 0
+            request.page_count = capped_limit
+
+            ret, payload = context.get_option_screen(request)
+            if ret != RET_OK:
+                raise RuntimeError(str(payload))
+
+            last_page, universe_count, frame = payload
+            rows = _as_rows(frame)
+            contracts: list[dict[str, Any]] = []
+            for index, row in enumerate(rows, start=1):
+                mapped = self._map_option_screen_row(row, rank=index)
+                if mapped:
+                    contracts.append(mapped)
+
+            elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+            return {
+                "contracts": contracts,
+                "universe_count": int(universe_count or 0),
+                "last_page": bool(last_page),
+                "latency_ms": elapsed_ms,
+                "source": "futu",
+                "filters": {
+                    "vol_oi_min": vol_oi_min,
+                    "volume_min": volume_min,
+                    "limit": capped_limit,
+                },
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            logger.warning("Futu option screen failed: %s", exc)
+            return {
+                "contracts": [],
+                "universe_count": 0,
+                "error": f"futu_option_screen_failed: {exc}",
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+        finally:
+            close = getattr(context, "close", None)
+            if callable(close):
+                close()
+
+    def _map_option_screen_row(self, row: dict[str, Any], *, rank: int) -> dict[str, Any] | None:
+        code = str(row.get("code") or "").strip()
+        option_name = str(row.get("option_name") or code).strip()
+        if not code and not option_name:
+            return None
+
+        option_type_raw = row.get("option_type")
+        contract_type = "call" if option_type_raw == 1 else "put" if option_type_raw == 2 else None
+        type_letter = "C" if contract_type == "call" else "P" if contract_type == "put" else "?"
+
+        underlying_info = row.get("underlying")
+        underlying = None
+        if isinstance(underlying_info, dict):
+            owner_code = underlying_info.get("code") or underlying_info.get("stock_code")
+            if owner_code:
+                underlying = display_symbol_from_futu_code(str(owner_code))
+        if not underlying:
+            underlying = option_name.split()[0] if option_name else display_symbol_from_futu_code(code)
+
+        strike = _safe_float(row.get("strike_price"))
+        volume = _safe_int(row.get("volume")) or 0
+        oi = _safe_int(row.get("open_interest")) or 0
+        vol_oi = _safe_float(row.get("vol_oi_ratio"))
+        if vol_oi is None and oi > 0:
+            vol_oi = round(volume / oi, 4)
+
+        expiry_raw = _clean_value(row.get("strike_date"))
+        expiry = str(expiry_raw)[:10] if expiry_raw else None
+        left_day = _safe_int(row.get("left_day"))
+
+        iv_raw = _safe_float(row.get("implied_volatility"))
+        iv_pct = round(iv_raw, 2) if iv_raw is not None else None
+        if iv_pct is not None and iv_pct <= 2:
+            iv_pct = round(iv_pct * 100.0, 2)
+
+        premium = _safe_float(row.get("premium"))
+        if premium is None:
+            premium = _safe_float(row.get("mid_price")) or _safe_float(row.get("price"))
+
+        change_ratio = _safe_float(row.get("change_ratio"))
+        change_pct = round(change_ratio * 100.0, 2) if change_ratio is not None and abs(change_ratio) <= 2 else change_ratio
+
+        return {
+            "rank": rank,
+            "code": code,
+            "option_name": option_name,
+            "underlying": underlying,
+            "option_type": type_letter,
+            "contract_type": contract_type,
+            "strike": strike,
+            "expiry": expiry,
+            "dte": left_day,
+            "volume": volume,
+            "oi": oi,
+            "vol_oi_ratio": round(vol_oi, 4) if vol_oi is not None else None,
+            "premium": premium,
+            "iv": iv_pct,
+            "delta": _safe_float(row.get("delta")),
+            "change_ratio": change_pct,
         }
 
 

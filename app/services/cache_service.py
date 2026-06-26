@@ -193,3 +193,7 @@ def key_earnings_calendar(date_range: str) -> str:
 
 def key_stock_financials(symbol: str, stmt: str) -> str:
     return f"stock:financials:{symbol.upper()}:{stmt}"
+
+
+def key_unusual_leaderboard() -> str:
+    return "options:unusual-leaderboard:v1"

@@ -116,6 +116,13 @@ def start_scheduler() -> None:
         IntervalTrigger(minutes=15),
         id="options_chain", replace_existing=True, max_instances=1,
     )
+    from app.services.unusual_leaderboard import refresh_unusual_leaderboard_cache
+
+    _scheduler.add_job(
+        lambda: _market_hours_guard() and _run_safe(refresh_unusual_leaderboard_cache, "unusual_leaderboard"),
+        IntervalTrigger(minutes=15),
+        id="unusual_leaderboard", replace_existing=True, max_instances=1,
+    )
     _scheduler.add_job(
         lambda: _market_hours_guard() and _run_safe(sync_stock_quotes_pipeline, "stock_quotes"),
         IntervalTrigger(minutes=15),

@@ -26,6 +26,7 @@ from app.services.cache_service import (
     TTL_HOT, cache_get, cache_set,
     key_options_chain, key_gex,
 )
+from app.services.unusual_leaderboard import get_unusual_leaderboard_page, refresh_unusual_leaderboard_cache
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -427,6 +428,33 @@ def get_unusual_options(
             "underlying_price": r.underlying_price,
         })
     return {"contracts": result, "count": len(result)}
+
+
+@router.get("/unusual-leaderboard")
+def get_unusual_leaderboard(
+    page: int = Query(1, ge=1, le=10),
+    limit: int = Query(10, ge=1, le=10),
+    vol_oi_min: float = Query(3.0, ge=0),
+    volume_min: int = Query(500, ge=0),
+    refresh: bool = Query(False, description="Force refresh from Futu (admin/debug)"),
+):
+    """Top 100 unusual US options from Futu get_option_screen; paginated 10 per page."""
+    return get_unusual_leaderboard_page(
+        page=page,
+        page_size=limit,
+        vol_oi_min=vol_oi_min,
+        volume_min=volume_min,
+        force_refresh=refresh,
+    )
+
+
+@router.post("/unusual-leaderboard/refresh")
+def refresh_unusual_leaderboard_endpoint():
+    """Manual cache refresh for unusual leaderboard."""
+    payload = refresh_unusual_leaderboard_cache()
+    if payload.get("error"):
+        raise HTTPException(status_code=503, detail=payload["error"])
+    return payload
 
 
 @router.get("/unusual-v2")
