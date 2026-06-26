@@ -196,4 +196,8 @@ def key_stock_financials(symbol: str, stmt: str) -> str:
 
 
 def key_unusual_leaderboard() -> str:
-    return "options:unusual-leaderboard:v1"
+    return key_options_leaderboard("unusual")
+
+
+def key_options_leaderboard(board: str) -> str:
+    return f"options:leaderboard:v1:{board.strip().lower()}"

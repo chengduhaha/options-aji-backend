@@ -26,7 +26,13 @@ from app.services.cache_service import (
     TTL_HOT, cache_get, cache_set,
     key_options_chain, key_gex,
 )
-from app.services.unusual_leaderboard import get_unusual_leaderboard_page, refresh_unusual_leaderboard_cache
+from app.services.options_leaderboard import (
+    get_leaderboard,
+    get_unusual_leaderboard_page,
+    refresh_all_leaderboards_cache,
+    refresh_leaderboard_cache,
+    refresh_unusual_leaderboard_cache,
+)
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -428,6 +434,34 @@ def get_unusual_options(
             "underlying_price": r.underlying_price,
         })
     return {"contracts": result, "count": len(result)}
+
+
+@router.get("/leaderboard/{board}")
+def get_options_leaderboard(
+    board: str,
+    refresh: bool = Query(False, description="Force refresh from Futu (admin/debug)"),
+):
+    """Full cached leaderboard for client-side filtering (15-min TTL)."""
+    return get_leaderboard(board, force_refresh=refresh)
+
+
+@router.post("/leaderboard/refresh")
+def refresh_all_leaderboards_endpoint():
+    """Manual refresh for all option leaderboards."""
+    payload = refresh_all_leaderboards_cache()
+    errors = [bid for bid, row in payload.items() if isinstance(row, dict) and row.get("error")]
+    if errors and len(errors) == len(payload):
+        raise HTTPException(status_code=503, detail=f"all_boards_failed:{','.join(errors)}")
+    return {"boards": payload, "refreshed_at": payload.get("unusual", {}).get("synced_at")}
+
+
+@router.post("/leaderboard/{board}/refresh")
+def refresh_leaderboard_endpoint(board: str):
+    """Manual cache refresh for one leaderboard board."""
+    payload = refresh_leaderboard_cache(board)  # type: ignore[arg-type]
+    if payload.get("error"):
+        raise HTTPException(status_code=503, detail=payload["error"])
+    return payload
 
 
 @router.get("/unusual-leaderboard")

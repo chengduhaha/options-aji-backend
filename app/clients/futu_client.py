@@ -510,8 +510,30 @@ class FutuQuoteClient:
         limit: int = 100,
     ) -> dict[str, Any]:
         """Fetch top unusual US stock options via Futu get_option_screen."""
+        result = self.get_option_screen_board(
+            sort_indicator="VOL_OI_RATIO",
+            sort_desc=True,
+            option_filters=[
+                {"indicator": "VOL_OI_RATIO", "lower": float(vol_oi_min)},
+                {"indicator": "VOLUME", "lower": int(volume_min)},
+            ],
+            limit=limit,
+        )
+        if result.get("contracts") is None and result.get("items") is not None:
+            result["contracts"] = result["items"]
+        return result
+
+    def get_option_screen_board(
+        self,
+        *,
+        sort_indicator: str,
+        sort_desc: bool = True,
+        option_filters: list[dict[str, Any]] | None = None,
+        limit: int = 150,
+    ) -> dict[str, Any]:
+        """Fetch a ranked US options board via Futu get_option_screen."""
         if not self.enabled:
-            return {"contracts": [], "universe_count": 0, "error": "futu_not_enabled"}
+            return {"items": [], "contracts": [], "universe_count": 0, "error": "futu_not_enabled"}
 
         capped_limit = max(1, min(int(limit), 200))
         started = time.monotonic()
@@ -519,10 +541,30 @@ class FutuQuoteClient:
         try:
             from futu import OptIndicator, OptMarketCategory, OptionScreenRequest, RET_OK
 
+            indicator_map = {name: getattr(OptIndicator, name) for name in dir(OptIndicator) if name.isupper()}
+            sort_key = indicator_map.get(sort_indicator.upper())
+            if sort_key is None:
+                raise ValueError(f"unknown_sort_indicator:{sort_indicator}")
+
             request = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
-            request.add_option_filter(OptIndicator.VOL_OI_RATIO, lower=float(vol_oi_min))
-            request.add_option_filter(OptIndicator.VOLUME, lower=int(volume_min))
-            request.add_sort(OptIndicator.VOL_OI_RATIO, desc=True)
+            for filt in option_filters or []:
+                indicator_name = str(filt.get("indicator") or "").upper()
+                indicator = indicator_map.get(indicator_name)
+                if indicator is None:
+                    continue
+                values = filt.get("values")
+                lower = filt.get("lower")
+                upper = filt.get("upper")
+                if values:
+                    request.add_option_filter(indicator, values=list(values))
+                else:
+                    request.add_option_filter(
+                        indicator,
+                        lower=lower,
+                        upper=upper,
+                    )
+
+            request.add_sort(sort_key, desc=bool(sort_desc))
             request.page_from = 0
             request.page_count = capped_limit
 
@@ -530,31 +572,27 @@ class FutuQuoteClient:
             if ret != RET_OK:
                 raise RuntimeError(str(payload))
 
-            last_page, universe_count, frame = payload
+            _last_page, universe_count, frame = payload
             rows = _as_rows(frame)
-            contracts: list[dict[str, Any]] = []
+            items: list[dict[str, Any]] = []
             for index, row in enumerate(rows, start=1):
                 mapped = self._map_option_screen_row(row, rank=index)
                 if mapped:
-                    contracts.append(mapped)
+                    items.append(mapped)
 
             elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+            synced_at = datetime.now(timezone.utc).isoformat()
             return {
-                "contracts": contracts,
+                "items": items,
+                "contracts": items,
                 "universe_count": int(universe_count or 0),
-                "last_page": bool(last_page),
                 "latency_ms": elapsed_ms,
-                "source": "futu",
-                "filters": {
-                    "vol_oi_min": vol_oi_min,
-                    "volume_min": volume_min,
-                    "limit": capped_limit,
-                },
-                "synced_at": datetime.now(timezone.utc).isoformat(),
+                "synced_at": synced_at,
             }
         except Exception as exc:
-            logger.warning("Futu option screen failed: %s", exc)
+            logger.warning("Futu option screen board failed sort=%s: %s", sort_indicator, exc)
             return {
+                "items": [],
                 "contracts": [],
                 "universe_count": 0,
                 "error": f"futu_option_screen_failed: {exc}",
@@ -577,10 +615,14 @@ class FutuQuoteClient:
 
         underlying_info = row.get("underlying")
         underlying = None
+        spot: float | None = None
         if isinstance(underlying_info, dict):
             owner_code = underlying_info.get("code") or underlying_info.get("stock_code")
             if owner_code:
                 underlying = display_symbol_from_futu_code(str(owner_code))
+            spot_raw = underlying_info.get("price")
+            if isinstance(spot_raw, (int, float)) and spot_raw > 0:
+                spot = float(spot_raw)
         if not underlying:
             underlying = option_name.split()[0] if option_name else display_symbol_from_futu_code(code)
 
@@ -606,12 +648,56 @@ class FutuQuoteClient:
         if iv_pct is not None and iv_pct <= 2:
             iv_pct = round(iv_pct * 100.0, 2)
 
+        hv_raw = _safe_float(row.get("history_volatility"))
+        hv_pct = round(hv_raw, 2) if hv_raw is not None else None
+        if hv_pct is not None and hv_pct <= 2:
+            hv_pct = round(hv_pct * 100.0, 2)
+
         premium = _safe_float(row.get("premium"))
+        price = _safe_float(row.get("price"))
         if premium is None:
-            premium = _safe_float(row.get("mid_price")) or _safe_float(row.get("price"))
+            premium = _safe_float(row.get("mid_price")) or price
 
         change_ratio = _safe_float(row.get("change_ratio"))
-        change_pct = round(change_ratio * 100.0, 2) if change_ratio is not None and abs(change_ratio) <= 2 else change_ratio
+        change_pct = (
+            round(change_ratio * 100.0, 2)
+            if change_ratio is not None and abs(change_ratio) <= 2
+            else change_ratio
+        )
+
+        in_the_money_raw = row.get("in_the_money")
+        in_the_money = bool(in_the_money_raw) if in_the_money_raw is not None else None
+
+        moneyness = "OTM"
+        if strike is not None and spot is not None and spot > 0:
+            rel = abs(strike - spot) / spot
+            if rel < 0.005:
+                moneyness = "ATM"
+            elif contract_type == "call":
+                moneyness = "ITM" if strike < spot else "OTM"
+            elif contract_type == "put":
+                moneyness = "ITM" if strike > spot else "OTM"
+        elif in_the_money is True:
+            moneyness = "ITM"
+        elif in_the_money is False:
+            moneyness = "OTM"
+
+        sell_ann = _safe_float(row.get("sell_annualized_return"))
+        if sell_ann is not None and sell_ann <= 2:
+            sell_ann = round(sell_ann * 100.0, 2)
+
+        sell_prob = _safe_float(row.get("sell_profit_probability"))
+        if sell_prob is not None and sell_prob <= 1:
+            sell_prob = round(sell_prob * 100.0, 2)
+
+        itm_prob = _safe_float(row.get("itm_probability"))
+        if itm_prob is not None and itm_prob <= 1:
+            itm_prob = round(itm_prob * 100.0, 2)
+
+        spread = _safe_float(row.get("bid_ask_spread"))
+        turnover = _safe_float(row.get("turnover"))
+        oi_mcap = _safe_float(row.get("open_interest_market_cap"))
+        iv_hv = _safe_float(row.get("iv_hv_ratio"))
 
         return {
             "rank": rank,
@@ -626,10 +712,27 @@ class FutuQuoteClient:
             "volume": volume,
             "oi": oi,
             "vol_oi_ratio": round(vol_oi, 4) if vol_oi is not None else None,
+            "turnover": turnover,
+            "oi_mcap": oi_mcap,
             "premium": premium,
+            "price": price,
             "iv": iv_pct,
+            "hv": hv_pct,
+            "iv_hv": iv_hv,
             "delta": _safe_float(row.get("delta")),
+            "gamma": _safe_float(row.get("gamma")),
+            "vega": _safe_float(row.get("vega")),
+            "theta": _safe_float(row.get("theta")),
             "change_ratio": change_pct,
+            "in_the_money": in_the_money,
+            "moneyness": moneyness,
+            "sell_ann": sell_ann,
+            "sell_prob": sell_prob,
+            "itm_prob": itm_prob,
+            "spread": spread,
+            "bid_vol": _safe_int(row.get("bid_volume")),
+            "ask_vol": _safe_int(row.get("ask_volume")),
+            "underlying_price": spot,
         }
 
 
