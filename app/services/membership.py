@@ -10,7 +10,7 @@ from app.db.models_user import UserRow
 
 V3Tier = Literal["guest", "free", "member", "admin"]
 
-FREE_ROW_LIMIT = 5
+FREE_ROW_LIMIT = 10
 FREE_SYMBOL_MASK_RANKS = 3
 MEMBER_UNUSUAL_ROW_LIMIT = 100
 FREE_GEX_SYMBOL = "SPY"

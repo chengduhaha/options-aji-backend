@@ -1,7 +1,61 @@
 """Regression tests for GEX history snapshot seeding."""
 from __future__ import annotations
 
+import json
+import math
+
+from app.analytics import gex_history
 from app.api.routes import options
+
+
+def test_seed_price_closes_skips_nan_values(monkeypatch) -> None:
+    import datetime as dt
+
+    class Index:
+        def date(self):
+            return dt.date(2026, 6, 26)
+
+    class Row:
+        def get(self, key):
+            return float("nan") if key == "Close" else None
+
+    class Hist:
+        empty = False
+
+        def iterrows(self):
+            return [(Index(), Row())]
+
+    class Ticker:
+        def history(self, **_kwargs):
+            return Hist()
+
+    monkeypatch.setattr(gex_history, "yf_ticker", lambda _sym: Ticker())
+    assert gex_history.seed_price_closes("SPY") == []
+
+
+def test_list_gex_history_skips_non_finite_points(monkeypatch) -> None:
+    class Redis:
+        def hgetall(self, _key):
+            return {
+                "2026-06-25": json.dumps(
+                    {"date": "2026-06-25", "netGex": 1.2, "gammaFlip": float("nan")}
+                ),
+                "2026-06-26": json.dumps(
+                    {"date": "2026-06-26", "netGex": 1.5, "gammaFlip": 690.0}
+                ),
+            }
+
+    monkeypatch.setattr(gex_history, "redis_client_optional", lambda: Redis())
+    rows = gex_history.list_gex_history("SPY")
+    assert len(rows) == 2
+    assert rows[0]["gammaFlip"] is None
+    assert rows[1]["gammaFlip"] == 690.0
+    assert all(
+        value is None or (isinstance(value, float) and math.isfinite(value))
+        for row in rows
+        for value in row.values()
+        if isinstance(value, float)
+    )
 
 
 def test_options_gex_cached_profile_records_history_snapshot(monkeypatch) -> None:
