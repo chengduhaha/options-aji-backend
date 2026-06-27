@@ -107,27 +107,16 @@ def _parse_strike_from_option_name(option_name: str) -> float | None:
 
 
 def _strike_millis_candidates_from_code(code: str) -> list[float]:
-    """All plausible strikes from a Futu OCC code suffix (handles truncated zeros)."""
+    """Strike from Futu OCC suffix: millis = round(strike * 1000), leading zeros stripped."""
     match = _OPTION_CODE_STRIKE_RE.search(str(code or "").strip().upper())
     if not match:
         return []
     digits = match.group(1)
     if not digits or not digits.isdigit():
         return []
-
-    seen: set[float] = set()
-    # Leading zeros stripped: pad left to 8 millis digits, divide by 1000.
-    seen.add(int(digits.zfill(8)) / 1000.0)
-    # Trailing zeros stripped (e.g. C115000 → 1150.00 not 115.00 when spot ~1132).
-    max_trailing = max(0, 8 - len(digits))
-    for extra in range(1, max_trailing + 1):
-        extended = f"{digits}{'0' * extra}"
-        if len(extended) <= 8:
-            seen.add(int(extended.zfill(8)) / 1000.0)
-        else:
-            seen.add(int(extended) / 1000.0)
-
-    return sorted(s for s in seen if s > 0)
+    # Pad leading zeros to 8 millis digits (Futu strips them), then / 1000.
+    strike = int(digits.zfill(8)) / 1000.0
+    return [strike] if strike > 0 else []
 
 
 def _parse_strike_from_option_code(code: str) -> float | None:

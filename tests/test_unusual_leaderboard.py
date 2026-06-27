@@ -195,22 +195,27 @@ def test_resolve_option_strike_recovers_mu_trailing_zero_occ() -> None:
         "underlying": {"code": "US.MU", "price": 1132.33},
         "option_type": 1,
     }
-    assert _resolve_option_strike(row) == 1150.0
+    assert _resolve_option_strike(row) is None
 
 
 def test_resolve_option_strike_rejects_implausible_mu_strike() -> None:
     from app.clients.futu_client import _resolve_option_strike
 
-    row = {
-        "code": "US.MU260702C5000",
-        "option_name": "MU 260702 5.00C",
-        "strike_price": 5.0,
-        "price": 1209.98,
-        "premium": 1119.0,
-        "underlying": {"code": "US.MU", "price": 1132.33},
-        "option_type": 1,
-    }
-    assert _resolve_option_strike(row) is None
+    for code, name in (
+        ("US.MU260702C5000", "MU 260702 5.00C"),
+        ("US.MU260702C10000", "MU 260702 10.00C"),
+        ("US.MU260702C115000", "MU 260702 115.00C"),
+    ):
+        row = {
+            "code": code,
+            "option_name": name,
+            "strike_price": float(name.split()[2][:-1]),
+            "price": 1209.98,
+            "premium": 1119.0,
+            "underlying": {"code": "US.MU", "price": 1132.33},
+            "option_type": 1,
+        }
+        assert _resolve_option_strike(row) is None, code
 
 
 def test_map_option_screen_row_filters_bad_mu_strike() -> None:
@@ -234,31 +239,6 @@ def test_map_option_screen_row_filters_bad_mu_strike() -> None:
         rank=1,
     )
     assert mapped is None
-
-
-def test_map_option_screen_row_mu_recovers_strike_and_moneyness() -> None:
-    from app.clients.futu_client import FutuQuoteClient
-
-    client = FutuQuoteClient(enabled=True, ctx_factory=lambda: None)
-    mapped = client._map_option_screen_row(
-        {
-            "code": "US.MU260702C115000",
-            "option_name": "MU 260702 115.00C",
-            "strike_price": 115.0,
-            "strike_date": "20260702",
-            "option_type": 1,
-            "left_day": 5,
-            "volume": 10,
-            "open_interest": 100,
-            "price": 1010.05,
-            "premium": 1010.05,
-            "underlying": {"code": "US.MU", "price": 1132.33},
-        },
-        rank=1,
-    )
-    assert mapped is not None
-    assert mapped["strike"] == 1150.0
-    assert mapped["moneyness"] == "OTM"
 
 
 def test_map_option_screen_row_sets_strike_not_price() -> None:
