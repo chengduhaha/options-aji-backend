@@ -183,16 +183,52 @@ def test_leaderboard_free_user_gets_five_rows() -> None:
     assert gated["access"]["row_limit"] == 5
 
 
-def test_leaderboard_locked_board_for_free_user() -> None:
+def test_leaderboard_previously_locked_board_shows_five_rows() -> None:
     payload = {
         "board": "seller",
-        "items": [{"rank": 1, "symbol": "SPY"}],
-        "total": 1,
+        "items": [{"rank": i, "underlying": f"SYM{i}"} for i in range(1, 21)],
+        "total": 20,
     }
     access = resolve_v3_access(None)
     gated = apply_leaderboard_access(payload, board_id="seller", access=access)
-    assert gated["locked"] is True
-    assert gated["items"] == []
+    assert gated["locked"] is False
+    assert len(gated["items"]) == 5
+    assert gated["access"]["row_limit"] == 5
+
+
+def test_leaderboard_symbol_masking_ranks_one_to_three() -> None:
+    payload = {
+        "board": "high-iv",
+        "items": [{"rank": i, "underlying": f"SYM{i}"} for i in range(1, 6)],
+        "total": 5,
+    }
+    access = resolve_v3_access(None)
+    gated = apply_leaderboard_access(payload, board_id="high-iv", access=access)
+    assert gated["items"][0]["symbol_masked"] is True
+    assert gated["items"][0]["underlying"] == ""
+    assert gated["items"][2]["symbol_masked"] is True
+    assert gated["items"][3]["symbol_masked"] is False
+    assert gated["items"][3]["underlying"] == "SYM4"
+    assert gated["items"][4]["symbol_masked"] is False
+    assert gated["items"][4]["underlying"] == "SYM5"
+
+
+def test_leaderboard_member_gets_unmasked_rows() -> None:
+    payload = {
+        "board": "seller",
+        "items": [{"rank": i, "underlying": f"SYM{i}"} for i in range(1, 6)],
+        "total": 5,
+    }
+    user = SimpleNamespace(
+        role="member",
+        membership_expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    access = resolve_v3_access(user)
+    gated = apply_leaderboard_access(payload, board_id="seller", access=access)
+    assert gated["locked"] is False
+    assert len(gated["items"]) == 5
+    assert gated["items"][0].get("symbol_masked") is not True
+    assert gated["items"][0]["underlying"] == "SYM1"
 
 
 def test_gex_non_spy_blocked_for_free_user() -> None:

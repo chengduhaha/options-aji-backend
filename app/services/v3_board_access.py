@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from fastapi import HTTPException, status
 
 from app.services.membership import (
     FREE_GEX_SYMBOL,
-    FREE_PREVIEW_BOARDS,
     FREE_ROW_LIMIT,
-    LOCKED_BOARDS,
+    FREE_SYMBOL_MASK_RANKS,
     MEMBER_UNUSUAL_ROW_LIMIT,
     V3Access,
 )
 
 
-def _access_meta(access: V3Access, *, board_id: str, locked: bool = False) -> dict[str, Any]:
+def _free_allowed_filters(board_id: str) -> list[str]:
+    if board_id == "unusual":
+        return ["cp", "topN"]
+    return []
+
+
+def _access_meta(access: V3Access, *, board_id: str) -> dict[str, Any]:
     if access.is_member:
         if board_id == "unusual":
             return {
@@ -27,6 +33,7 @@ def _access_meta(access: V3Access, *, board_id: str, locked: bool = False) -> di
                 "allowed_filters": ["cp", "dte", "moneyness", "topN", "page"],
                 "allowed_top_n": [10, 25],
                 "max_pages": 10,
+                "symbol_mask_ranks": 0,
             }
         return {
             "tier": access.tier,
@@ -36,40 +43,40 @@ def _access_meta(access: V3Access, *, board_id: str, locked: bool = False) -> di
             "allowed_filters": ["cp", "dte", "moneyness", "topN", "page"],
             "allowed_top_n": [10, 25],
             "max_pages": None,
+            "symbol_mask_ranks": 0,
         }
-
-    if locked or board_id in LOCKED_BOARDS:
-        return {
-            "tier": access.tier,
-            "is_member": False,
-            "locked": True,
-            "row_limit": 0,
-            "allowed_filters": [],
-            "allowed_top_n": [],
-            "max_pages": 0,
-        }
-
-    if board_id in FREE_PREVIEW_BOARDS:
-        meta: dict[str, Any] = {
-            "tier": access.tier,
-            "is_member": False,
-            "locked": False,
-            "row_limit": FREE_ROW_LIMIT,
-            "allowed_filters": ["cp", "topN"] if board_id == "unusual" else [],
-            "allowed_top_n": [10] if board_id == "unusual" else [],
-            "max_pages": 1 if board_id == "unusual" else 1,
-        }
-        return meta
 
     return {
         "tier": access.tier,
         "is_member": False,
-        "locked": True,
-        "row_limit": 0,
-        "allowed_filters": [],
-        "allowed_top_n": [],
-        "max_pages": 0,
+        "locked": False,
+        "row_limit": FREE_ROW_LIMIT,
+        "allowed_filters": _free_allowed_filters(board_id),
+        "allowed_top_n": [10] if board_id == "unusual" else [],
+        "max_pages": 1,
+        "symbol_mask_ranks": FREE_SYMBOL_MASK_RANKS,
     }
+
+
+def _mask_row_symbol(row: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    masked = copy.deepcopy(row)
+    if rank <= FREE_SYMBOL_MASK_RANKS:
+        masked["symbol_masked"] = True
+        masked["underlying"] = ""
+        if "ticker" in masked:
+            masked["ticker"] = ""
+    else:
+        masked["symbol_masked"] = False
+    return masked
+
+
+def _apply_symbol_masking(items: list[Any]) -> list[dict[str, Any]]:
+    masked_items: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        row = dict(item) if isinstance(item, dict) else {"rank": index + 1}
+        rank = int(row.get("rank") or index + 1)
+        masked_items.append(_mask_row_symbol(row, rank=rank))
+    return masked_items
 
 
 def apply_leaderboard_access(
@@ -79,16 +86,6 @@ def apply_leaderboard_access(
     access: V3Access,
 ) -> dict[str, Any]:
     items: list[Any] = list(payload.get("items") or [])
-    locked = board_id in LOCKED_BOARDS and not access.is_member
-
-    if locked:
-        return {
-            **payload,
-            "items": [],
-            "total": 0,
-            "locked": True,
-            "access": _access_meta(access, board_id=board_id, locked=True),
-        }
 
     if access.is_member:
         if board_id == "unusual":
@@ -101,22 +98,14 @@ def apply_leaderboard_access(
             "access": _access_meta(access, board_id=board_id),
         }
 
-    if board_id in FREE_PREVIEW_BOARDS:
-        trimmed = items[:FREE_ROW_LIMIT]
-        return {
-            **payload,
-            "items": trimmed,
-            "total": len(trimmed),
-            "locked": False,
-            "access": _access_meta(access, board_id=board_id),
-        }
-
+    trimmed = items[:FREE_ROW_LIMIT]
+    masked_items = _apply_symbol_masking(trimmed)
     return {
         **payload,
-        "items": [],
-        "total": 0,
-        "locked": True,
-        "access": _access_meta(access, board_id=board_id, locked=True),
+        "items": masked_items,
+        "total": len(masked_items),
+        "locked": False,
+        "access": _access_meta(access, board_id=board_id),
     }
 
 

@@ -10,11 +10,8 @@ from app.db.models_user import UserRow
 
 V3Tier = Literal["guest", "free", "member", "admin"]
 
-LOCKED_BOARDS = frozenset(
-    {"open-interest", "turnover", "high-iv", "high-gamma", "seller"},
-)
-FREE_PREVIEW_BOARDS = frozenset({"unusual", "volume", "liquidity"})
 FREE_ROW_LIMIT = 5
+FREE_SYMBOL_MASK_RANKS = 3
 MEMBER_UNUSUAL_ROW_LIMIT = 100
 FREE_GEX_SYMBOL = "SPY"
 
