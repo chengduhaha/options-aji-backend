@@ -27,6 +27,11 @@ LEADERBOARD_LIMIT = 150
 LEADERBOARD_STAGGER_SECONDS = 1.5
 UNUSUAL_VOL_OI_MIN = 3.0
 UNUSUAL_VOLUME_MIN = 500
+SELLER_MIN_VOLUME = 50
+SELLER_MIN_STOCK_PRICE = 5.0
+SELLER_MAX_SELL_ANN = 500.0
+SELLER_MIN_DELTA = 0.15
+SELLER_MAX_DELTA = 0.45
 
 ALL_BOARD_IDS: tuple[BoardId, ...] = (
     "unusual",
@@ -54,6 +59,7 @@ class BoardConfig:
     sort_indicator: str
     sort_desc: bool
     filters: tuple[BoardFilter, ...] = ()
+    underlying_filters: tuple[BoardFilter, ...] = ()
     limit: int = LEADERBOARD_LIMIT
 
 
@@ -96,6 +102,15 @@ BOARD_CONFIGS: dict[BoardId, BoardConfig] = {
         board_id="seller",
         sort_indicator="SELL_ANNUALIZED_RETURN",
         sort_desc=True,
+        filters=(
+            # OTM only — deep ITM penny calls (e.g. HIVE $0.50C @ $4) inflate sell_ann.
+            BoardFilter("IN_THE_MONEY", values=(0,)),
+            BoardFilter("VOLUME", lower=SELLER_MIN_VOLUME),
+        ),
+        underlying_filters=(
+            # Spot from Futu underlying.price (add_underlying_retrieve STOCK_PRICE).
+            BoardFilter("STOCK_PRICE", lower=SELLER_MIN_STOCK_PRICE),
+        ),
     ),
     "liquidity": BoardConfig(
         board_id="liquidity",
@@ -103,6 +118,57 @@ BOARD_CONFIGS: dict[BoardId, BoardConfig] = {
         sort_desc=False,
     ),
 }
+
+
+def _filter_dicts(filters: tuple[BoardFilter, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "indicator": f.indicator,
+            "lower": f.lower,
+            "upper": f.upper,
+            "values": list(f.values) if f.values else None,
+        }
+        for f in filters
+    ]
+
+
+def _is_valid_seller_row(row: dict[str, Any]) -> bool:
+    """Post-filter seller board: OTM sell candidates with sane annualized return."""
+    sell_ann = row.get("sell_ann")
+    if sell_ann is not None and float(sell_ann) > SELLER_MAX_SELL_ANN:
+        return False
+
+    spot_raw = row.get("underlying_price")
+    spot = float(spot_raw) if isinstance(spot_raw, (int, float)) else None
+    if spot is not None and spot < SELLER_MIN_STOCK_PRICE:
+        return False
+
+    strike_raw = row.get("strike")
+    strike = float(strike_raw) if isinstance(strike_raw, (int, float)) else None
+    contract_type = row.get("contract_type")
+
+    if row.get("in_the_money") is True:
+        return False
+
+    if spot is not None and spot > 0 and strike is not None and strike > 0:
+        if contract_type == "call" and strike < spot * 0.90:
+            return False
+        if contract_type == "put" and strike > spot * 1.10:
+            return False
+
+    delta_raw = row.get("delta")
+    if isinstance(delta_raw, (int, float)):
+        delta = abs(float(delta_raw))
+        if delta < SELLER_MIN_DELTA or delta > SELLER_MAX_DELTA:
+            return False
+
+    return True
+
+
+def _post_filter_board_items(board_id: BoardId, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if board_id != "seller":
+        return items
+    return [row for row in items if _is_valid_seller_row(row)]
 
 
 def _normalize_board_id(board: str) -> BoardId | None:
@@ -122,22 +188,15 @@ def refresh_leaderboard_cache(board: str) -> dict[str, Any]:
     payload = futu.get_option_screen_board(
         sort_indicator=config.sort_indicator,
         sort_desc=config.sort_desc,
-        option_filters=[
-            {
-                "indicator": f.indicator,
-                "lower": f.lower,
-                "upper": f.upper,
-                "values": list(f.values) if f.values else None,
-            }
-            for f in config.filters
-        ],
+        option_filters=_filter_dicts(config.filters),
+        underlying_filters=_filter_dicts(config.underlying_filters),
         limit=config.limit,
     )
     if payload.get("error"):
         logger.warning("leaderboard refresh failed board=%s err=%s", board_id, payload.get("error"))
         return {**payload, "board": board_id}
 
-    items = payload.get("items") or payload.get("contracts") or []
+    items = _post_filter_board_items(board_id, list(payload.get("items") or payload.get("contracts") or []))
     for index, row in enumerate(items, start=1):
         row["rank"] = index
 

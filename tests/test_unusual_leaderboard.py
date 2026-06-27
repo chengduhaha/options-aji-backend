@@ -265,3 +265,63 @@ def test_map_option_screen_row_sets_strike_not_price() -> None:
     assert mapped["strike"] == 711.0
     assert mapped["strike_price"] == 711.0
     assert mapped["price"] == 17.68
+
+
+def test_is_valid_seller_row_rejects_deep_itm_penny_call() -> None:
+    from app.services.options_leaderboard import _is_valid_seller_row
+
+    row = {
+        "code": "US.HIVE260731C500",
+        "underlying": "HIVE",
+        "contract_type": "call",
+        "strike": 0.5,
+        "underlying_price": 4.03,
+        "in_the_money": True,
+        "moneyness": "ITM",
+        "sell_ann": 8559.65,
+        "delta": 0.99944,
+    }
+    assert _is_valid_seller_row(row) is False
+
+
+def test_is_valid_seller_row_accepts_otm_sell_candidate() -> None:
+    from app.services.options_leaderboard import _is_valid_seller_row
+
+    row = {
+        "code": "US.NVDA260626C00195000",
+        "underlying": "NVDA",
+        "contract_type": "call",
+        "strike": 195.0,
+        "underlying_price": 180.0,
+        "in_the_money": False,
+        "moneyness": "OTM",
+        "sell_ann": 28.0,
+        "delta": 0.334,
+        "volume": 500,
+    }
+    assert _is_valid_seller_row(row) is True
+
+
+def test_is_valid_seller_row_rejects_extreme_sell_ann() -> None:
+    from app.services.options_leaderboard import _is_valid_seller_row
+
+    row = {
+        "contract_type": "put",
+        "strike": 170.0,
+        "underlying_price": 180.0,
+        "in_the_money": False,
+        "sell_ann": 1200.0,
+        "delta": -0.25,
+    }
+    assert _is_valid_seller_row(row) is False
+
+
+def test_seller_board_config_has_otm_and_min_price_filters() -> None:
+    from app.services.options_leaderboard import BOARD_CONFIGS
+
+    seller = BOARD_CONFIGS["seller"]
+    filter_names = {f.indicator for f in seller.filters}
+    underlying_names = {f.indicator for f in seller.underlying_filters}
+    assert "IN_THE_MONEY" in filter_names
+    assert "VOLUME" in filter_names
+    assert "STOCK_PRICE" in underlying_names

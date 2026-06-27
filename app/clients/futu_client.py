@@ -691,6 +691,7 @@ class FutuQuoteClient:
         sort_indicator: str,
         sort_desc: bool = True,
         option_filters: list[dict[str, Any]] | None = None,
+        underlying_filters: list[dict[str, Any]] | None = None,
         limit: int = 150,
     ) -> dict[str, Any]:
         """Fetch a ranked US options board via Futu get_option_screen."""
@@ -701,14 +702,37 @@ class FutuQuoteClient:
         started = time.monotonic()
         context = self._new_context()
         try:
-            from futu import OptIndicator, OptMarketCategory, OptionScreenRequest, RET_OK
+            from futu import OptIndicator, OptMarketCategory, OptUnderlyingIndicator, OptionScreenRequest, RET_OK
 
             indicator_map = {name: getattr(OptIndicator, name) for name in dir(OptIndicator) if name.isupper()}
+            underlying_map = {
+                name: getattr(OptUnderlyingIndicator, name)
+                for name in dir(OptUnderlyingIndicator)
+                if name.isupper()
+            }
             sort_key = indicator_map.get(sort_indicator.upper())
             if sort_key is None:
                 raise ValueError(f"unknown_sort_indicator:{sort_indicator}")
 
             request = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
+            # Populate row["underlying"]["price"] for moneyness + strike sanity checks.
+            stock_price_key = underlying_map.get("STOCK_PRICE")
+            if stock_price_key is not None:
+                request.add_underlying_retrieve(stock_price_key)
+
+            for filt in underlying_filters or []:
+                indicator_name = str(filt.get("indicator") or "").upper()
+                indicator = underlying_map.get(indicator_name)
+                if indicator is None:
+                    continue
+                values = filt.get("values")
+                lower = filt.get("lower")
+                upper = filt.get("upper")
+                if values:
+                    request.add_underlying_filter(indicator, values=list(values))
+                else:
+                    request.add_underlying_filter(indicator, lower=lower, upper=upper)
+
             for filt in option_filters or []:
                 indicator_name = str(filt.get("indicator") or "").upper()
                 indicator = indicator_map.get(indicator_name)
