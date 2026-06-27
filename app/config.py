@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     futu_snapshot_batch_size: int = 200
     futu_cache_ttl_seconds: int = 3
     futu_connect_timeout_seconds: float = 0.3
+    #: OpenD connection pool — reuse OpenQuoteContext instead of per-request connect.
+    futu_pool_min: int = 2
+    futu_pool_max: int = 8
+    futu_pool_idle_sec: int = 300
+    futu_pool_acquire_timeout_sec: float = 30.0
     futu_background_options_sync_enabled: bool = False
     #: When False, daily stock K-lines skip Futu and use yfinance only.
     futu_daily_klines_enabled: bool = True

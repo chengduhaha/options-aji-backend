@@ -131,12 +131,29 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     start_scheduler()
 
+    if cfg.futu_enabled:
+        try:
+            from app.clients.futu_pool import get_futu_pool
+
+            pool = get_futu_pool()
+            logger.info("Futu connection pool ready: %s", pool.stats)
+        except Exception as exc:
+            logger.warning("Futu connection pool warmup failed: %s", exc)
+
     yield
 
     if ibkr_conn.ibkr_is_enabled():
         await ibkr_conn.ibkr_disconnect_shutdown()
 
     stop_scheduler()
+
+    if cfg.futu_enabled:
+        try:
+            from app.clients.futu_pool import close_futu_pool
+
+            close_futu_pool()
+        except Exception as exc:
+            logger.warning("Futu connection pool shutdown: %s", exc)
 
 
 def create_application() -> FastAPI:

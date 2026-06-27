@@ -178,10 +178,32 @@ def test_disabled_futu_client_returns_not_enabled() -> None:
 
 def test_unreachable_opend_returns_fast_error() -> None:
     from app.clients.futu_client import FutuQuoteClient
+    from app.clients.futu_pool import FutuConnectionPool, reset_futu_pool_for_tests
 
-    client = FutuQuoteClient(enabled=True, host="127.0.0.1", port=1, connect_timeout_seconds=0.05)
+    reset_futu_pool_for_tests()
+    pool = FutuConnectionPool(
+        host="127.0.0.1",
+        port=1,
+        min_size=0,
+        max_size=2,
+        acquire_timeout_sec=0.2,
+        connect_timeout_seconds=0.05,
+    )
+    client = FutuQuoteClient(
+        enabled=True,
+        host="127.0.0.1",
+        port=1,
+        connect_timeout_seconds=0.05,
+        ctx_factory=None,
+    )
+
+    # Inject unreachable pool for this host/port without warming global production pool.
+    import app.clients.futu_pool as pool_mod
+
+    pool_mod._pools[("127.0.0.1", 1)] = pool
 
     quote = client.get_stock_quote("AAPL")
 
     assert quote["symbol"] == "AAPL"
-    assert "futu_opend_unreachable" in quote["error"]
+    assert "futu_opend_unreachable" in quote["error"] or "futu_pool" in quote["error"]
+    reset_futu_pool_for_tests()

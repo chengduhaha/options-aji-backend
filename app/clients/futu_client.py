@@ -7,9 +7,10 @@ import re
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pandas as pd
 
@@ -312,6 +313,39 @@ class FutuQuoteClient:
             raise RuntimeError(f"futu_sdk_unavailable: {exc}") from exc
         return OpenQuoteContext(host=self.host, port=self.port)
 
+    @contextmanager
+    def _borrow_context(self) -> Iterator[Any]:
+        """Acquire a pooled OpenQuoteContext (or test ctx_factory) for one operation."""
+        if self.ctx_factory is not None:
+            context = self.ctx_factory()
+            try:
+                yield context
+            finally:
+                close = getattr(context, "close", None)
+                if callable(close):
+                    close()
+            return
+
+        if not self.enabled:
+            self._ensure_reachable()
+            try:
+                from futu import OpenQuoteContext
+            except Exception as exc:  # pragma: no cover
+                raise RuntimeError(f"futu_sdk_unavailable: {exc}") from exc
+            context = OpenQuoteContext(host=self.host, port=self.port)
+            try:
+                yield context
+            finally:
+                close = getattr(context, "close", None)
+                if callable(close):
+                    close()
+            return
+
+        from app.clients.futu_pool import get_futu_pool
+
+        with get_futu_pool(host=self.host, port=self.port, start=False).connection() as context:
+            yield context
+
     def _ensure_reachable(self) -> None:
         try:
             with socket.create_connection((self.host, self.port), timeout=self.connect_timeout_seconds):
@@ -365,65 +399,61 @@ class FutuQuoteClient:
         if not self.enabled:
             return None
         futu_code = normalize_futu_us_code(symbol)
-        context = self._new_context()
         try:
-            from futu import AuType, KLType, RET_OK
+            with self._borrow_context() as context:
+                from futu import AuType, KLType, RET_OK
 
-            today = date.today()
-            span_days = max(count + 60, 400)
-            start = (today - timedelta(days=span_days)).isoformat()
-            end = today.isoformat()
-            ret, data, page_req = context.request_history_kline(
-                futu_code,
-                start=start,
-                end=end,
-                max_count=max(count, 30),
-                ktype=KLType.K_DAY,
-                autype=AuType.QFQ,
-            )
-            if ret != RET_OK or data is None or getattr(data, "empty", True):
-                logger.warning("Futu kline empty %s ret=%s", symbol, ret)
-                return None
-            frames = [data]
-            while page_req is not None:
-                ret, page_data, page_req = context.request_history_kline(
+                today = date.today()
+                span_days = max(count + 60, 400)
+                start = (today - timedelta(days=span_days)).isoformat()
+                end = today.isoformat()
+                ret, data, page_req = context.request_history_kline(
                     futu_code,
                     start=start,
                     end=end,
                     max_count=max(count, 30),
                     ktype=KLType.K_DAY,
                     autype=AuType.QFQ,
-                    page_req_key=page_req,
                 )
-                if ret != RET_OK or page_data is None or getattr(page_data, "empty", True):
-                    break
-                frames.append(page_data)
-            frame = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0].copy()
-            if "time_key" in frame.columns:
-                frame = frame.drop_duplicates(subset=["time_key"], keep="last")
-                frame = frame.sort_values("time_key")
-            rename = {
-                "open": "Open",
-                "high": "High",
-                "low": "Low",
-                "close": "Close",
-                "volume": "Volume",
-            }
-            for src, dst in rename.items():
-                if src in frame.columns and dst not in frame.columns:
-                    frame[dst] = frame[src]
-            if "time_key" in frame.columns:
-                frame.index = pd.to_datetime(frame["time_key"])
-            elif "code" in frame.columns and len(frame) > 0:
-                frame.index = pd.RangeIndex(len(frame))
-            return frame
+                if ret != RET_OK or data is None or getattr(data, "empty", True):
+                    logger.warning("Futu kline empty %s ret=%s", symbol, ret)
+                    return None
+                frames = [data]
+                while page_req is not None:
+                    ret, page_data, page_req = context.request_history_kline(
+                        futu_code,
+                        start=start,
+                        end=end,
+                        max_count=max(count, 30),
+                        ktype=KLType.K_DAY,
+                        autype=AuType.QFQ,
+                        page_req_key=page_req,
+                    )
+                    if ret != RET_OK or page_data is None or getattr(page_data, "empty", True):
+                        break
+                    frames.append(page_data)
+                frame = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0].copy()
+                if "time_key" in frame.columns:
+                    frame = frame.drop_duplicates(subset=["time_key"], keep="last")
+                    frame = frame.sort_values("time_key")
+                rename = {
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "volume": "Volume",
+                }
+                for src, dst in rename.items():
+                    if src in frame.columns and dst not in frame.columns:
+                        frame[dst] = frame[src]
+                if "time_key" in frame.columns:
+                    frame.index = pd.to_datetime(frame["time_key"])
+                elif "code" in frame.columns and len(frame) > 0:
+                    frame.index = pd.RangeIndex(len(frame))
+                return frame
         except Exception as exc:
             logger.warning("Futu daily klines failed %s: %s", symbol, exc)
             return None
-        finally:
-            close = getattr(context, "close", None)
-            if callable(close):
-                close()
 
     def get_stock_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         if not self.enabled:
@@ -529,8 +559,7 @@ class FutuQuoteClient:
     def get_market_snapshot_rows(self, code_list: list[str]) -> list[dict[str, Any]]:
         if not code_list:
             return []
-        context = self._new_context()
-        try:
+        with self._borrow_context() as context:
             all_rows: list[dict[str, Any]] = []
             for start_index in range(0, len(code_list), self.snapshot_batch_size):
                 batch = code_list[start_index : start_index + self.snapshot_batch_size]
@@ -539,10 +568,6 @@ class FutuQuoteClient:
                     raise RuntimeError(str(data))
                 all_rows.extend(_as_rows(data))
             return all_rows
-        finally:
-            close = getattr(context, "close", None)
-            if callable(close):
-                close()
 
     def get_option_chain_rows(
         self,
@@ -552,8 +577,7 @@ class FutuQuoteClient:
         end: str,
         contract_type: str | None = None,
     ) -> list[dict[str, Any]]:
-        context = self._new_context()
-        try:
+        with self._borrow_context() as context:
             option_type = self._futu_option_type(contract_type)
             ret, data = context.get_option_chain(
                 futu_code,
@@ -564,10 +588,6 @@ class FutuQuoteClient:
             if ret != RET_OK:
                 raise RuntimeError(str(data))
             return _as_rows(data)
-        finally:
-            close = getattr(context, "close", None)
-            if callable(close):
-                close()
 
     def _futu_option_type(self, contract_type: str | None) -> str:
         try:
@@ -700,82 +720,81 @@ class FutuQuoteClient:
 
         capped_limit = max(1, min(int(limit), 200))
         started = time.monotonic()
-        context: Any | None = None
         try:
-            context = self._new_context()
-            from futu import OptIndicator, OptMarketCategory, OptUnderlyingIndicator, OptionScreenRequest, RET_OK
+            with self._borrow_context() as context:
+                from futu import OptIndicator, OptMarketCategory, OptUnderlyingIndicator, OptionScreenRequest, RET_OK
 
-            indicator_map = {name: getattr(OptIndicator, name) for name in dir(OptIndicator) if name.isupper()}
-            underlying_map = {
-                name: getattr(OptUnderlyingIndicator, name)
-                for name in dir(OptUnderlyingIndicator)
-                if name.isupper()
-            }
-            sort_key = indicator_map.get(sort_indicator.upper())
-            if sort_key is None:
-                raise ValueError(f"unknown_sort_indicator:{sort_indicator}")
+                indicator_map = {name: getattr(OptIndicator, name) for name in dir(OptIndicator) if name.isupper()}
+                underlying_map = {
+                    name: getattr(OptUnderlyingIndicator, name)
+                    for name in dir(OptUnderlyingIndicator)
+                    if name.isupper()
+                }
+                sort_key = indicator_map.get(sort_indicator.upper())
+                if sort_key is None:
+                    raise ValueError(f"unknown_sort_indicator:{sort_indicator}")
 
-            request = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
-            # Populate row["underlying"]["price"] for moneyness + strike sanity checks.
-            stock_price_key = underlying_map.get("STOCK_PRICE")
-            if stock_price_key is not None:
-                request.add_underlying_retrieve(stock_price_key)
+                request = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
+                # Populate row["underlying"]["price"] for moneyness + strike sanity checks.
+                stock_price_key = underlying_map.get("STOCK_PRICE")
+                if stock_price_key is not None:
+                    request.add_underlying_retrieve(stock_price_key)
 
-            for filt in underlying_filters or []:
-                indicator_name = str(filt.get("indicator") or "").upper()
-                indicator = underlying_map.get(indicator_name)
-                if indicator is None:
-                    continue
-                values = filt.get("values")
-                lower = filt.get("lower")
-                upper = filt.get("upper")
-                if values:
-                    request.add_underlying_filter(indicator, values=list(values))
-                else:
-                    request.add_underlying_filter(indicator, lower=lower, upper=upper)
+                for filt in underlying_filters or []:
+                    indicator_name = str(filt.get("indicator") or "").upper()
+                    indicator = underlying_map.get(indicator_name)
+                    if indicator is None:
+                        continue
+                    values = filt.get("values")
+                    lower = filt.get("lower")
+                    upper = filt.get("upper")
+                    if values:
+                        request.add_underlying_filter(indicator, values=list(values))
+                    else:
+                        request.add_underlying_filter(indicator, lower=lower, upper=upper)
 
-            for filt in option_filters or []:
-                indicator_name = str(filt.get("indicator") or "").upper()
-                indicator = indicator_map.get(indicator_name)
-                if indicator is None:
-                    continue
-                values = filt.get("values")
-                lower = filt.get("lower")
-                upper = filt.get("upper")
-                if values:
-                    request.add_option_filter(indicator, values=list(values))
-                else:
-                    request.add_option_filter(
-                        indicator,
-                        lower=lower,
-                        upper=upper,
-                    )
+                for filt in option_filters or []:
+                    indicator_name = str(filt.get("indicator") or "").upper()
+                    indicator = indicator_map.get(indicator_name)
+                    if indicator is None:
+                        continue
+                    values = filt.get("values")
+                    lower = filt.get("lower")
+                    upper = filt.get("upper")
+                    if values:
+                        request.add_option_filter(indicator, values=list(values))
+                    else:
+                        request.add_option_filter(
+                            indicator,
+                            lower=lower,
+                            upper=upper,
+                        )
 
-            request.add_sort(sort_key, desc=bool(sort_desc))
-            request.page_from = 0
-            request.page_count = capped_limit
+                request.add_sort(sort_key, desc=bool(sort_desc))
+                request.page_from = 0
+                request.page_count = capped_limit
 
-            ret, payload = context.get_option_screen(request)
-            if ret != RET_OK:
-                raise RuntimeError(str(payload))
+                ret, payload = context.get_option_screen(request)
+                if ret != RET_OK:
+                    raise RuntimeError(str(payload))
 
-            _last_page, universe_count, frame = payload
-            rows = _as_rows(frame)
-            items: list[dict[str, Any]] = []
-            for index, row in enumerate(rows, start=1):
-                mapped = self._map_option_screen_row(row, rank=index)
-                if mapped:
-                    items.append(mapped)
+                _last_page, universe_count, frame = payload
+                rows = _as_rows(frame)
+                items: list[dict[str, Any]] = []
+                for index, row in enumerate(rows, start=1):
+                    mapped = self._map_option_screen_row(row, rank=index)
+                    if mapped:
+                        items.append(mapped)
 
-            elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
-            synced_at = datetime.now(timezone.utc).isoformat()
-            return {
-                "items": items,
-                "contracts": items,
-                "universe_count": int(universe_count or 0),
-                "latency_ms": elapsed_ms,
-                "synced_at": synced_at,
-            }
+                elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+                synced_at = datetime.now(timezone.utc).isoformat()
+                return {
+                    "items": items,
+                    "contracts": items,
+                    "universe_count": int(universe_count or 0),
+                    "latency_ms": elapsed_ms,
+                    "synced_at": synced_at,
+                }
         except Exception as exc:
             logger.warning("Futu option screen board failed sort=%s: %s", sort_indicator, exc)
             return {
@@ -785,11 +804,6 @@ class FutuQuoteClient:
                 "error": f"futu_option_screen_failed: {exc}",
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             }
-        finally:
-            if context is not None:
-                close = getattr(context, "close", None)
-                if callable(close):
-                    close()
 
     def _map_option_screen_row(self, row: dict[str, Any], *, rank: int) -> dict[str, Any] | None:
         code = str(row.get("code") or "").strip()

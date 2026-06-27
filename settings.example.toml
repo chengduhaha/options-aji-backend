@@ -22,6 +22,11 @@ futu_port = 11111
 futu_snapshot_batch_size = 200
 futu_cache_ttl_seconds = 3
 futu_connect_timeout_seconds = 0.3
+# OpenD 连接池：复用 OpenQuoteContext，避免并发时 OpenD backlog 饱和
+futu_pool_min = 2
+futu_pool_max = 8
+futu_pool_idle_sec = 300
+futu_pool_acquire_timeout_sec = 30.0
 # 盘时每 15 分钟将 Futu 期权链写入 options_snapshots（异动 v2）；需 futu-opend 已登录
 futu_background_options_sync_enabled = true
 # 日 K 线：Futu 数据过期时自动回退 yfinance；设为 false 则完全不用 Futu K 线
