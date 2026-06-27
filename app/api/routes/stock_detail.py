@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps_membership import get_v3_access
+from app.analytics.gex_history import record_gex_snapshot
 from app.services.membership import V3Access
 from app.services.v3_board_access import enforce_gex_symbol_access
 from app.analytics.iv_metrics import (
