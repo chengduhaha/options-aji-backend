@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import socket
 import threading
 import time
@@ -89,6 +90,58 @@ def _safe_int(value: Any) -> int | None:
     if number is None:
         return None
     return int(number)
+
+
+_OPTION_NAME_STRIKE_RE = re.compile(r"\s(\d+(?:\.\d+)?)[CP]$", re.IGNORECASE)
+_OPTION_CODE_STRIKE_RE = re.compile(r"[CP](\d+)$", re.IGNORECASE)
+
+
+def _parse_strike_from_option_name(option_name: str) -> float | None:
+    """Parse strike from Futu option_name, e.g. 'QQQ 260717 711.00C'."""
+    match = _OPTION_NAME_STRIKE_RE.search(str(option_name or "").strip())
+    if not match:
+        return None
+    return _safe_float(match.group(1))
+
+
+def _parse_strike_from_option_code(code: str) -> float | None:
+    """Parse strike from Futu OCC-style code, e.g. 'US.QQQ260717C711000'."""
+    match = _OPTION_CODE_STRIKE_RE.search(str(code or "").strip().upper())
+    if not match:
+        return None
+    digits = match.group(1)
+    if not digits:
+        return None
+    return int(digits.zfill(8)) / 1000.0
+
+
+def _resolve_option_strike(row: dict[str, Any]) -> float | None:
+    """Resolve contract strike — never use option price/premium fields."""
+    option_name = str(row.get("option_name") or "").strip()
+    code = str(row.get("code") or "").strip()
+    strike_from_name = _parse_strike_from_option_name(option_name)
+    strike_from_code = _parse_strike_from_option_code(code)
+    strike_from_field = _safe_float(row.get("strike_price"))
+
+    price = _safe_float(row.get("price"))
+    premium = _safe_float(row.get("premium"))
+
+    # Prefer human-readable option_name, then OCC code, then raw field.
+    candidates = [strike_from_name, strike_from_code, strike_from_field]
+    for strike in candidates:
+        if strike is None or strike <= 0:
+            continue
+        # Guard: Futu can return option last price in strike_price for some rows.
+        if price is not None and abs(strike - price) < 0.02:
+            alt = next((s for s in (strike_from_name, strike_from_code) if s is not None and s > 0), None)
+            if alt is not None and abs(alt - price) >= 0.02:
+                return alt
+        if premium is not None and abs(strike - premium) < 0.02:
+            alt = next((s for s in (strike_from_name, strike_from_code) if s is not None and s > 0), None)
+            if alt is not None and abs(alt - premium) >= 0.02:
+                return alt
+        return strike
+    return None
 
 
 def _iv_to_decimal(value: Any) -> float | None:
@@ -626,7 +679,7 @@ class FutuQuoteClient:
         if not underlying:
             underlying = option_name.split()[0] if option_name else display_symbol_from_futu_code(code)
 
-        strike = _safe_float(row.get("strike_price"))
+        strike = _resolve_option_strike(row)
         volume = _safe_int(row.get("volume")) or 0
         oi = _safe_int(row.get("open_interest")) or 0
         vol_oi = _safe_float(row.get("vol_oi_ratio"))
@@ -707,6 +760,7 @@ class FutuQuoteClient:
             "option_type": type_letter,
             "contract_type": contract_type,
             "strike": strike,
+            "strike_price": strike,
             "expiry": expiry,
             "dte": left_day,
             "volume": volume,

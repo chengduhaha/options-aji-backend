@@ -154,3 +154,54 @@ def test_leaderboard_routes_are_registered() -> None:
     paths = {route.path for route in create_application().routes}
     assert "/api/options/unusual-leaderboard" in paths
     assert "/api/options/leaderboard/{board}" in paths
+
+
+def test_resolve_option_strike_prefers_option_name_over_price_field() -> None:
+    from app.clients.futu_client import _resolve_option_strike
+
+    row = {
+        "code": "US.QQQ260717C711000",
+        "option_name": "QQQ 260717 711.00C",
+        "strike_price": 17.68,
+        "price": 17.68,
+        "premium": 17.9,
+    }
+    assert _resolve_option_strike(row) == 711.0
+
+
+def test_resolve_option_strike_parses_short_occ_code() -> None:
+    from app.clients.futu_client import _resolve_option_strike
+
+    row = {
+        "code": "US.HIVE260731C500",
+        "option_name": "HIVE 260731 0.50C",
+        "strike_price": 0.5,
+        "price": 3.6,
+    }
+    assert _resolve_option_strike(row) == 0.5
+
+
+def test_map_option_screen_row_sets_strike_not_price() -> None:
+    from app.clients.futu_client import FutuQuoteClient
+
+    client = FutuQuoteClient(enabled=True, ctx_factory=lambda: None)
+    mapped = client._map_option_screen_row(
+        {
+            "code": "US.QQQ260717C711000",
+            "option_name": "QQQ 260717 711.00C",
+            "strike_price": 711.0,
+            "strike_date": "2026-07-17",
+            "option_type": 1,
+            "left_day": 20,
+            "volume": 1000,
+            "open_interest": 500,
+            "price": 17.68,
+            "premium": 17.9,
+            "underlying": {"code": "US.QQQ", "price": 706.52},
+        },
+        rank=1,
+    )
+    assert mapped is not None
+    assert mapped["strike"] == 711.0
+    assert mapped["strike_price"] == 711.0
+    assert mapped["price"] == 17.68
