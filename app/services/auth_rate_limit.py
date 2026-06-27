@@ -74,3 +74,35 @@ def clear_login_failure(email_norm: str) -> None:
         r.delete(f"auth:login_lock:{email_norm}")
     except Exception as exc:
         logger.debug("clear_login_failure redis error: %s", exc)
+
+
+def redeem_rate_limited(client_ip: str) -> bool:
+    """Return True if redeem attempts from this IP should be blocked."""
+    r = _client()
+    if r is None:
+        return False
+    key = f"auth:redeem_rl:{client_ip}"
+    try:
+        n = int(r.incr(key))
+        if n == 1:
+            r.expire(key, 3600)
+        return n > 20
+    except Exception as exc:
+        logger.debug("redeem_rate_limited redis error: %s", exc)
+        return False
+
+
+def generate_codes_rate_limited(admin_id: str) -> bool:
+    """Return True if admin code generation should be blocked."""
+    r = _client()
+    if r is None:
+        return False
+    key = f"auth:gen_codes_rl:{admin_id}"
+    try:
+        n = int(r.incr(key))
+        if n == 1:
+            r.expire(key, 3600)
+        return n > 30
+    except Exception as exc:
+        logger.debug("generate_codes_rate_limited redis error: %s", exc)
+        return False

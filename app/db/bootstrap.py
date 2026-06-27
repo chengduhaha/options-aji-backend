@@ -6,7 +6,7 @@ import logging
 from sqlalchemy import inspect, text
 
 from app.db.models import Base
-from app.db.models_user import UserRow  # noqa: F401
+from app.db.models_user import ActivationCodeRow, UserRow  # noqa: F401
 from app.db.session import SessionLocal, engine
 from app.services.discord_menu_authors import seed_discord_menu_author_settings
 from app.services.site_nav import seed_nav_settings
@@ -41,11 +41,29 @@ def _migrate_options_snapshot_columns() -> None:
             logger.info("Added column options_snapshots.%s", col_name)
 
 
+def _migrate_user_membership_column() -> None:
+    """Add membership_expires_at to users table (idempotent)."""
+    insp = inspect(engine)
+    if "users" not in insp.get_table_names():
+        return
+    existing = {c["name"] for c in insp.get_columns("users")}
+    if "membership_expires_at" in existing:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "sqlite":
+            conn.execute(text("ALTER TABLE users ADD COLUMN membership_expires_at TEXT"))
+        else:
+            conn.execute(text("ALTER TABLE users ADD COLUMN membership_expires_at TIMESTAMP WITH TIME ZONE"))
+        logger.info("Added column users.membership_expires_at")
+
+
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to call multiple times."""
     logger.info("Initializing database tables...")
     Base.metadata.create_all(bind=engine)
     _migrate_options_snapshot_columns()
+    _migrate_user_membership_column()
     session = SessionLocal()
     try:
         seed_nav_settings(session)

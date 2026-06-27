@@ -18,6 +18,7 @@ from app.config import Settings, get_settings
 from app.db.models import AccessKeyRow
 from app.db.models_user import UserEmailVerificationRow, UserRow
 from app.db.session import db_session_dep
+from app.services.activation_codes import redeem_activation_code
 from app.services.auth_rate_limit import (
     clear_login_failure,
     is_login_locked,
@@ -26,6 +27,7 @@ from app.services.auth_rate_limit import (
 )
 from app.services.email_sender import EmailSendError, is_email_configured, send_verification_email
 from app.services.jwt_tokens import create_access_token
+from app.services.membership import membership_public_fields, resolve_v3_access
 from app.services.passwords import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,7 @@ class UserPublic(BaseModel):
     role: str
     created_at: Optional[datetime]
     email_verified: bool
+    membership: dict[str, object] = Field(default_factory=dict)
 
 
 class UserAccessKeySummary(BaseModel):
@@ -150,7 +153,18 @@ class AdminUserPatchBody(BaseModel):
     role: Literal["user", "admin", "disabled"]
 
 
+class RedeemCodeBody(BaseModel):
+    code: str = Field(min_length=8, max_length=64)
+
+
+class RedeemCodeResponse(BaseModel):
+    success: bool = True
+    user: UserPublic
+    membership_expires_at: datetime
+
+
 def _to_public(row: UserRow) -> UserPublic:
+    access = resolve_v3_access(row)
     return UserPublic(
         id=row.id,
         email=row.email,
@@ -158,6 +172,7 @@ def _to_public(row: UserRow) -> UserPublic:
         role=row.role,
         created_at=row.created_at,
         email_verified=bool(row.email_verified),
+        membership=membership_public_fields(access),
     )
 
 
@@ -651,6 +666,31 @@ async def login(
 @router.get("/me", response_model=UserPublic)
 async def me(user: Annotated[UserRow, Depends(get_current_user)]) -> UserPublic:
     return _to_public(user)
+
+
+@router.post("/redeem", response_model=RedeemCodeResponse)
+async def redeem_code(
+    body: RedeemCodeBody,
+    request: Request,
+    user: Annotated[UserRow, Depends(get_current_user)],
+    session: Session = Depends(db_session_dep),
+) -> RedeemCodeResponse:
+    updated = redeem_activation_code(
+        session,
+        user=user,
+        raw_code=body.code,
+        client_ip=_client_ip(request),
+    )
+    expires = updated.membership_expires_at
+    if expires is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": "membership_missing", "message": "会员状态更新失败。"},
+        )
+    return RedeemCodeResponse(
+        user=_to_public(updated),
+        membership_expires_at=expires,
+    )
 
 
 @router.post("/logout")

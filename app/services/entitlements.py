@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.db.models import ApiEntitlementRow
 from app.db.models_user import UserRow
 from app.services.access_keys import AccessKeyGrant, inspect_access_key
+from app.services.membership import membership_active
 
 EntitlementSource = Literal[
     "anonymous",
@@ -153,6 +154,14 @@ def resolve_commercial_entitlement(
     current = now or datetime.now(timezone.utc)
     if user is not None and user.role == "admin":
         return CommercialEntitlement(tier=CommercialTier.ADMIN, source="admin", user=user)
+
+    if user is not None and membership_active(user, now=current):
+        return CommercialEntitlement(
+            tier=CommercialTier.PRO,
+            source="jwt",
+            user=user,
+            current_period_end=user.membership_expires_at,
+        )
 
     rows = _candidate_rows(session, user=user, legacy_api_key=legacy_api_key)
     for row in rows:

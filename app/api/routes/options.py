@@ -11,6 +11,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, distinct, func, select
 from sqlalchemy.orm import Session
 
+from app.api.deps_membership import get_v3_access
+from app.services.membership import V3Access
+
 from app.analytics.gex_compute import compute_gex_profile, compute_gex_profile_from_contracts
 from app.analytics.gex_history import list_gex_history, record_gex_snapshot, seed_price_closes
 from app.analytics.iv_metrics import hv_series_and_current, iv_rank_percentile_proxy
@@ -33,6 +36,7 @@ from app.services.options_leaderboard import (
     refresh_leaderboard_cache,
     refresh_unusual_leaderboard_cache,
 )
+from app.services.v3_board_access import apply_leaderboard_access, enforce_gex_symbol_access
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -324,9 +328,11 @@ def get_gex(
     realtime: bool = Query(False, description="Use live Futu quote and option Greeks when available."),
     limit: int = Query(500, ge=50, le=1000),
     strike_window_pct: float = Query(0.2, ge=0.05, le=1.0),
+    access: V3Access = Depends(get_v3_access),
 ):
     """Return Gamma Exposure profile (from cache, upstream, or local compute)."""
     sym = symbol.upper()
+    enforce_gex_symbol_access(sym, access)
     realtime = bool(_query_default(realtime, False))
     limit = int(_query_default(limit, 500))
     strike_window_pct = float(_query_default(strike_window_pct, 0.2))
@@ -376,10 +382,12 @@ def get_gex(
 def get_gex_history_endpoint(
     symbol: str,
     days: int = Query(120, ge=10, le=400),
+    access: V3Access = Depends(get_v3_access),
 ):
     """Sparse GEX points from Redis snapshots + Yahoo daily closes."""
 
     sym = symbol.upper()
+    enforce_gex_symbol_access(sym, access)
     cached = cache_get(key_gex(sym))
     if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):
         record_gex_snapshot(sym, dict(cached))
@@ -440,9 +448,12 @@ def get_unusual_options(
 def get_options_leaderboard(
     board: str,
     refresh: bool = Query(False, description="Force refresh from Futu (admin/debug)"),
+    access: V3Access = Depends(get_v3_access),
 ):
     """Full cached leaderboard for client-side filtering (15-min TTL)."""
-    return get_leaderboard(board, force_refresh=refresh)
+    payload = get_leaderboard(board, force_refresh=refresh)
+    board_id = str(payload.get("board") or board)
+    return apply_leaderboard_access(payload, board_id=board_id, access=access)
 
 
 @router.post("/leaderboard/refresh")

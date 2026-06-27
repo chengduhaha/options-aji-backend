@@ -31,6 +31,45 @@ class UserRow(Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verification_token: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    membership_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+
+class ActivationCodeRow(Base):
+    __tablename__ = "activation_codes"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    code_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    code_prefix: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    duration_tier: Mapped[str] = mapped_column(String(8), nullable=False)
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="available")
+    redeemed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    redeemed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_admin_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    batch_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    note: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=True,
+    )
 
 
 class UserEmailVerificationRow(Base):

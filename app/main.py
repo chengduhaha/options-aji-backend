@@ -18,6 +18,7 @@ from app.api.routes.admin_sync import router as admin_sync_router
 from app.api.routes.admin_usage import router as admin_usage_router
 from app.api.routes.alerts import router as alerts_router
 from app.api.routes.analyst import router as analyst_router
+from app.api.routes.activation_codes import router as activation_codes_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.brief import router as brief_router
@@ -247,6 +248,7 @@ def create_application() -> FastAPI:
     # ── Core routes ──
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(activation_codes_router)
     app.include_router(access_keys_router)
     app.include_router(admin_usage_router)
     app.include_router(admin_sync_router)

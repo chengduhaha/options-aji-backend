@@ -12,7 +12,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.analytics.gex_history import record_gex_snapshot
+from app.api.deps_membership import get_v3_access
+from app.services.membership import V3Access
+from app.services.v3_board_access import enforce_gex_symbol_access
 from app.analytics.iv_metrics import (
     hv_series_and_current,
     hv_series_and_meta_from_hist,
@@ -590,11 +592,13 @@ def stock_unusual_v2(
 @router.get("/{symbol}/gex")
 def stock_gex(
     symbol: str,
+    access: V3Access = Depends(get_v3_access),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
     from app.api.routes.options import _compute_gex_profile_from_db
 
     sym = symbol.strip().upper()
+    enforce_gex_symbol_access(sym, access)
     cached = cache_get(key_gex(sym))
     if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):
         return cached
