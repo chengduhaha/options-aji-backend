@@ -93,6 +93,8 @@ def _safe_int(value: Any) -> int | None:
 
 
 _OPTION_NAME_STRIKE_RE = re.compile(r"\s(\d+(?:\.\d+)?)[CP]$", re.IGNORECASE)
+# Futu US OCC: US.{SYMBOL}{YYMMDD}{C|P}{STRIKE_MILLIS}
+# STRIKE_MILLIS = round(strike * 1000), up to 8 digits. Futu strips leading AND trailing zeros.
 _OPTION_CODE_STRIKE_RE = re.compile(r"[CP](\d+)$", re.IGNORECASE)
 
 
@@ -104,44 +106,162 @@ def _parse_strike_from_option_name(option_name: str) -> float | None:
     return _safe_float(match.group(1))
 
 
-def _parse_strike_from_option_code(code: str) -> float | None:
-    """Parse strike from Futu OCC-style code, e.g. 'US.QQQ260717C711000'."""
+def _strike_millis_candidates_from_code(code: str) -> list[float]:
+    """All plausible strikes from a Futu OCC code suffix (handles truncated zeros)."""
     match = _OPTION_CODE_STRIKE_RE.search(str(code or "").strip().upper())
     if not match:
-        return None
+        return []
     digits = match.group(1)
-    if not digits:
+    if not digits or not digits.isdigit():
+        return []
+
+    seen: set[float] = set()
+    # Leading zeros stripped: pad left to 8 millis digits, divide by 1000.
+    seen.add(int(digits.zfill(8)) / 1000.0)
+    # Trailing zeros stripped (e.g. C115000 → 1150.00 not 115.00 when spot ~1132).
+    max_trailing = max(0, 8 - len(digits))
+    for extra in range(1, max_trailing + 1):
+        extended = f"{digits}{'0' * extra}"
+        if len(extended) <= 8:
+            seen.add(int(extended.zfill(8)) / 1000.0)
+        else:
+            seen.add(int(extended) / 1000.0)
+
+    return sorted(s for s in seen if s > 0)
+
+
+def _parse_strike_from_option_code(code: str) -> float | None:
+    """Default OCC parse (shortest millis form) — prefer _resolve_option_strike for boards."""
+    candidates = _strike_millis_candidates_from_code(code)
+    return candidates[0] if candidates else None
+
+
+def _spot_from_row(row: dict[str, Any]) -> float | None:
+    underlying_info = row.get("underlying")
+    if isinstance(underlying_info, dict):
+        spot = _safe_float(underlying_info.get("price"))
+        if spot is not None and spot > 0:
+            return spot
+    return _safe_float(row.get("underlying_price"))
+
+
+def _contract_type_from_row(row: dict[str, Any]) -> str | None:
+    option_type_raw = row.get("option_type")
+    if option_type_raw == 1:
+        return "call"
+    if option_type_raw == 2:
+        return "put"
+    mapped = _option_type(row.get("option_type"))
+    if mapped:
+        return mapped
+    name = str(row.get("option_name") or row.get("code") or "").upper()
+    if name.endswith("C"):
+        return "call"
+    if name.endswith("P"):
+        return "put"
+    return None
+
+
+def _strike_matches_option_quote(strike: float, row: dict[str, Any]) -> bool:
+    """True when strike equals option last/mid — likely polluted, not a real strike."""
+    price = _safe_float(row.get("price"))
+    premium = _safe_float(row.get("premium"))
+    mid = _safe_float(row.get("mid_price"))
+    for quote in (price, premium, mid):
+        if quote is not None and quote > 0 and abs(strike - quote) / max(quote, 1.0) < 0.02:
+            return True
+    return False
+
+
+def _is_strike_sane(strike: float, spot: float | None, contract_type: str | None) -> bool:
+    if strike <= 0:
+        return False
+    if spot is None or spot <= 0:
+        return True
+    if spot > 50 and abs(strike - spot) / spot > 0.5:
+        return False
+    if spot > 50:
+        if contract_type == "call" and strike < spot * 0.05:
+            return False
+        if contract_type == "put" and strike > spot * 20:
+            return False
+    return True
+
+
+def _pick_best_strike(
+    candidates: list[float],
+    *,
+    spot: float | None,
+    contract_type: str | None,
+    row: dict[str, Any],
+    option_name_strike: float | None = None,
+) -> float | None:
+    unique = sorted({c for c in candidates if c is not None and c > 0})
+    sane = [
+        s
+        for s in unique
+        if not _strike_matches_option_quote(s, row) and _is_strike_sane(s, spot, contract_type)
+    ]
+    if not sane:
         return None
-    return int(digits.zfill(8)) / 1000.0
+    if (
+        option_name_strike is not None
+        and option_name_strike in sane
+        and not _strike_matches_option_quote(option_name_strike, row)
+        and _is_strike_sane(option_name_strike, spot, contract_type)
+    ):
+        return option_name_strike
+    if spot is not None and spot > 0:
+        return min(sane, key=lambda s: abs(s - spot))
+    return sane[0]
 
 
 def _resolve_option_strike(row: dict[str, Any]) -> float | None:
-    """Resolve contract strike — never use option price/premium fields."""
+    """Resolve contract strike: OCC code → option_name → strike_price, with spot sanity."""
     option_name = str(row.get("option_name") or "").strip()
     code = str(row.get("code") or "").strip()
+    spot = _spot_from_row(row)
+    contract_type = _contract_type_from_row(row)
+
     strike_from_name = _parse_strike_from_option_name(option_name)
-    strike_from_code = _parse_strike_from_option_code(code)
+
+    candidates: list[float] = []
+    candidates.extend(_strike_millis_candidates_from_code(code))
+    if strike_from_name is not None:
+        candidates.append(strike_from_name)
     strike_from_field = _safe_float(row.get("strike_price"))
+    if strike_from_field is not None:
+        candidates.append(strike_from_field)
 
-    price = _safe_float(row.get("price"))
-    premium = _safe_float(row.get("premium"))
+    return _pick_best_strike(
+        candidates,
+        spot=spot,
+        contract_type=contract_type,
+        row=row,
+        option_name_strike=strike_from_name,
+    )
 
-    # Prefer human-readable option_name, then OCC code, then raw field.
-    candidates = [strike_from_name, strike_from_code, strike_from_field]
-    for strike in candidates:
-        if strike is None or strike <= 0:
-            continue
-        # Guard: Futu can return option last price in strike_price for some rows.
-        if price is not None and abs(strike - price) < 0.02:
-            alt = next((s for s in (strike_from_name, strike_from_code) if s is not None and s > 0), None)
-            if alt is not None and abs(alt - price) >= 0.02:
-                return alt
-        if premium is not None and abs(strike - premium) < 0.02:
-            alt = next((s for s in (strike_from_name, strike_from_code) if s is not None and s > 0), None)
-            if alt is not None and abs(alt - premium) >= 0.02:
-                return alt
-        return strike
-    return None
+
+def _compute_moneyness(
+    strike: float | None,
+    spot: float | None,
+    contract_type: str | None,
+    *,
+    in_the_money: bool | None = None,
+) -> str:
+    if strike is not None and spot is not None and spot > 0:
+        rel = abs(strike - spot) / spot
+        if rel < 0.005:
+            return "ATM"
+        if contract_type == "call":
+            return "ITM" if strike < spot else "OTM"
+        if contract_type == "put":
+            return "ITM" if strike > spot else "OTM"
+    if in_the_money is True:
+        return "ITM"
+    if in_the_money is False:
+        return "OTM"
+    return "OTM"
 
 
 def _iv_to_decimal(value: Any) -> float | None:
@@ -680,6 +800,10 @@ class FutuQuoteClient:
             underlying = option_name.split()[0] if option_name else display_symbol_from_futu_code(code)
 
         strike = _resolve_option_strike(row)
+        if strike is None:
+            logger.debug("skip option screen row: unresolved strike code=%s name=%s", code, option_name)
+            return None
+
         volume = _safe_int(row.get("volume")) or 0
         oi = _safe_int(row.get("open_interest")) or 0
         vol_oi = _safe_float(row.get("vol_oi_ratio"))
@@ -721,19 +845,7 @@ class FutuQuoteClient:
         in_the_money_raw = row.get("in_the_money")
         in_the_money = bool(in_the_money_raw) if in_the_money_raw is not None else None
 
-        moneyness = "OTM"
-        if strike is not None and spot is not None and spot > 0:
-            rel = abs(strike - spot) / spot
-            if rel < 0.005:
-                moneyness = "ATM"
-            elif contract_type == "call":
-                moneyness = "ITM" if strike < spot else "OTM"
-            elif contract_type == "put":
-                moneyness = "ITM" if strike > spot else "OTM"
-        elif in_the_money is True:
-            moneyness = "ITM"
-        elif in_the_money is False:
-            moneyness = "OTM"
+        moneyness = _compute_moneyness(strike, spot, contract_type, in_the_money=in_the_money)
 
         sell_ann = _safe_float(row.get("sell_annualized_return"))
         if sell_ann is not None and sell_ann <= 2:
