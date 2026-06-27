@@ -239,7 +239,9 @@ def get_leaderboard(
         return {"error": "unknown_board", "board": board, "items": [], "total": 0}
 
     cached = None if force_refresh else cache_get(key_options_leaderboard(board_id))
-    if not cached or not cached.get("items"):
+    if not cached:
+        cached = refresh_leaderboard_cache(board_id)
+    elif not cached.get("items") and not cached.get("error"):
         cached = refresh_leaderboard_cache(board_id)
 
     items: list[dict[str, Any]] = list(cached.get("items") or [])

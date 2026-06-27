@@ -700,8 +700,9 @@ class FutuQuoteClient:
 
         capped_limit = max(1, min(int(limit), 200))
         started = time.monotonic()
-        context = self._new_context()
+        context: Any | None = None
         try:
+            context = self._new_context()
             from futu import OptIndicator, OptMarketCategory, OptUnderlyingIndicator, OptionScreenRequest, RET_OK
 
             indicator_map = {name: getattr(OptIndicator, name) for name in dir(OptIndicator) if name.isupper()}
@@ -785,9 +786,10 @@ class FutuQuoteClient:
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             }
         finally:
-            close = getattr(context, "close", None)
-            if callable(close):
-                close()
+            if context is not None:
+                close = getattr(context, "close", None)
+                if callable(close):
+                    close()
 
     def _map_option_screen_row(self, row: dict[str, Any], *, rank: int) -> dict[str, Any] | None:
         code = str(row.get("code") or "").strip()
