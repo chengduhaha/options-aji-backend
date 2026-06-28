@@ -229,7 +229,13 @@ def get_blog_post_by_slug(
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "文章不存在。"})
     if row.status != "published" and admin is None:
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "文章不存在。"})
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "draft",
+                "message": "该文章尚未发布，仅管理员可预览。",
+            },
+        )
 
     attachments = (
         session.execute(select(BlogAttachmentRow).where(BlogAttachmentRow.post_id == row.id))
@@ -250,13 +256,14 @@ def download_blog_attachment(
     attachment_id: str,
     session: Session = Depends(db_session_dep),
     download: bool = Query(default=False),
+    admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
 ) -> FileResponse:
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
     if row.post_id:
         post = session.get(BlogPostRow, row.post_id)
-        if post is None or post.status != "published":
+        if post is None or (post.status != "published" and admin is None):
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
 
     try:

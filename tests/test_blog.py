@@ -104,6 +104,27 @@ def test_draft_hidden_from_public(db_session: Session) -> None:
     client = _admin_client(db_session)
     res = client.get("/api/blog/posts/draft-only")
     assert res.status_code == 404
+    assert res.json()["error"]["code"] == "draft"
+
+
+def test_admin_can_view_draft_with_auth(db_session: Session) -> None:
+    from app.api.deps_auth import get_optional_admin_user
+
+    app = create_application()
+    admin = db_session.get(UserRow, "admin-1")
+    assert admin is not None
+
+    def _override_db() -> Generator[Session, None, None]:
+        yield db_session
+
+    app.dependency_overrides[db_session_dep] = _override_db
+    app.dependency_overrides[get_optional_admin_user] = lambda: admin
+    client = TestClient(app)
+
+    res = client.get("/api/blog/posts/draft-only")
+    assert res.status_code == 200
+    assert res.json()["slug"] == "draft-only"
+    assert res.json()["status"] == "draft"
 
 
 def test_admin_create_update_delete_post(db_session: Session) -> None:
