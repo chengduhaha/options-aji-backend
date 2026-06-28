@@ -30,9 +30,19 @@ class BlogAttachmentPublic(BaseModel):
     file_size: int
     title_zh: Optional[str] = None
     title_en: Optional[str] = None
+    category: str = "general"
+    description_zh: Optional[str] = None
+    description_en: Optional[str] = None
+    is_sample: bool = True
+    post_id: Optional[str] = None
     download_url: str
     view_url: str
+    created_at: Optional[datetime] = None
 
+
+class BlogDocumentListResponse(BaseModel):
+    items: list[BlogAttachmentPublic]
+    categories: list[str] = Field(default_factory=list)
 
 class BlogPostSummary(BaseModel):
     id: str
@@ -96,6 +106,16 @@ class BlogUploadPdfResponse(BaseModel):
     post_id: Optional[str] = None
 
 
+class BlogAttachmentUpdateBody(BaseModel):
+    title_zh: Optional[str] = Field(default=None, max_length=256)
+    title_en: Optional[str] = Field(default=None, max_length=256)
+    category: Optional[str] = Field(default=None, max_length=64)
+    description_zh: Optional[str] = None
+    description_en: Optional[str] = None
+    is_sample: Optional[bool] = None
+    post_id: Optional[str] = None
+
+
 def _content_disposition(disposition: str, filename: str) -> str:
     safe_ascii = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._") or "document.pdf"
     encoded = quote(filename)
@@ -138,9 +158,24 @@ def _to_attachment_public(attachment: BlogAttachmentRow) -> BlogAttachmentPublic
         file_size=attachment.file_size,
         title_zh=attachment.title_zh,
         title_en=attachment.title_en,
+        category=attachment.category,
+        description_zh=attachment.description_zh,
+        description_en=attachment.description_en,
+        is_sample=attachment.is_sample,
+        post_id=attachment.post_id,
         download_url=download_url,
         view_url=view_url,
+        created_at=attachment.created_at,
     )
+
+
+def _attachment_is_public(attachment: BlogAttachmentRow, session: Session, admin: Optional[UserRow]) -> bool:
+    if attachment.post_id is None:
+        return attachment.is_sample or admin is not None
+    post = session.get(BlogPostRow, attachment.post_id)
+    if post is None:
+        return admin is not None
+    return post.status == "published" or admin is not None
 
 
 def _to_summary(row: BlogPostRow, attachment_count: int = 0) -> BlogPostSummary:
@@ -268,10 +303,8 @@ def download_blog_attachment(
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
-    if row.post_id:
-        post = session.get(BlogPostRow, row.post_id)
-        if post is None or (post.status != "published" and admin is None):
-            raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
+    if not _attachment_is_public(row, session, admin):
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
 
     try:
         path = resolve_pdf_path(row.stored_name)
@@ -285,6 +318,118 @@ def download_blog_attachment(
         filename=row.original_filename,
         headers={"Content-Disposition": _content_disposition(disposition, row.original_filename)},
     )
+
+
+@router.get("/api/blog/documents", response_model=BlogDocumentListResponse)
+def list_blog_documents(
+    session: Session = Depends(db_session_dep),
+    category: Optional[str] = Query(default=None),
+) -> BlogDocumentListResponse:
+    """Public sample documents (standalone PDFs marked is_sample)."""
+    filters = [
+        BlogAttachmentRow.post_id.is_(None),
+        BlogAttachmentRow.is_sample.is_(True),
+    ]
+    if category:
+        filters.append(BlogAttachmentRow.category == category.strip())
+
+    rows = (
+        session.execute(
+            select(BlogAttachmentRow)
+            .where(*filters)
+            .order_by(BlogAttachmentRow.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    categories = (
+        session.execute(
+            select(BlogAttachmentRow.category)
+            .where(
+                BlogAttachmentRow.post_id.is_(None),
+                BlogAttachmentRow.is_sample.is_(True),
+            )
+            .distinct()
+            .order_by(BlogAttachmentRow.category)
+        )
+        .scalars()
+        .all()
+    )
+    return BlogDocumentListResponse(
+        items=[_to_attachment_public(r) for r in rows],
+        categories=[c for c in categories if c],
+    )
+
+
+@router.get("/api/blog/attachments", response_model=BlogDocumentListResponse)
+def list_blog_attachments_admin(
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+    standalone_only: bool = Query(default=False),
+) -> BlogDocumentListResponse:
+    stmt = select(BlogAttachmentRow).order_by(BlogAttachmentRow.created_at.desc())
+    if standalone_only:
+        stmt = stmt.where(BlogAttachmentRow.post_id.is_(None))
+    rows = session.execute(stmt).scalars().all()
+    categories = (
+        session.execute(select(BlogAttachmentRow.category).distinct().order_by(BlogAttachmentRow.category))
+        .scalars()
+        .all()
+    )
+    return BlogDocumentListResponse(
+        items=[_to_attachment_public(r) for r in rows],
+        categories=[c for c in categories if c],
+    )
+
+
+@router.put("/api/blog/attachments/{attachment_id}", response_model=BlogAttachmentPublic)
+def update_blog_attachment(
+    attachment_id: str,
+    body: BlogAttachmentUpdateBody,
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> BlogAttachmentPublic:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
+
+    if body.title_zh is not None:
+        row.title_zh = body.title_zh.strip() or None
+    if body.title_en is not None:
+        row.title_en = body.title_en.strip() or None
+    if body.category is not None:
+        row.category = body.category.strip() or "general"
+    if body.description_zh is not None:
+        row.description_zh = body.description_zh
+    if body.description_en is not None:
+        row.description_en = body.description_en
+    if body.is_sample is not None:
+        row.is_sample = body.is_sample
+    if body.post_id is not None:
+        if body.post_id:
+            post = session.get(BlogPostRow, body.post_id)
+            if post is None:
+                raise HTTPException(status_code=404, detail={"code": "not_found", "message": "文章不存在。"})
+        row.post_id = body.post_id or None
+
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return _to_attachment_public(row)
+
+
+@router.delete("/api/blog/attachments/{attachment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_blog_attachment(
+    attachment_id: str,
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> None:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
+    delete_pdf(row.stored_name)
+    session.delete(row)
+    session.commit()
 
 
 @router.post("/api/blog/posts", response_model=BlogPostDetail, status_code=status.HTTP_201_CREATED)
@@ -411,6 +556,10 @@ async def upload_blog_pdf(
     post_id: Optional[str] = Form(default=None),
     title_zh: Optional[str] = Form(default=None),
     title_en: Optional[str] = Form(default=None),
+    category: Optional[str] = Form(default=None),
+    description_zh: Optional[str] = Form(default=None),
+    description_en: Optional[str] = Form(default=None),
+    is_sample: Optional[str] = Form(default=None),
     admin: UserRow = Depends(get_current_admin_user),
     session: Session = Depends(db_session_dep),
 ) -> BlogUploadPdfResponse:
@@ -425,6 +574,10 @@ async def upload_blog_pdf(
     except BlogStorageError as exc:
         raise HTTPException(status_code=400, detail={"code": "invalid_pdf", "message": str(exc)}) from exc
 
+    sample_flag = True
+    if is_sample is not None:
+        sample_flag = is_sample.strip().lower() in ("1", "true", "yes", "on")
+
     attachment = BlogAttachmentRow(
         post_id=post_id,
         stored_name=stored_name,
@@ -433,6 +586,10 @@ async def upload_blog_pdf(
         file_size=len(content),
         title_zh=title_zh,
         title_en=title_en,
+        category=(category or "general").strip() or "general",
+        description_zh=description_zh,
+        description_en=description_en,
+        is_sample=sample_flag,
     )
     session.add(attachment)
     session.commit()

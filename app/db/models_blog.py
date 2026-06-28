@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models import Base
@@ -58,6 +58,7 @@ class BlogAttachmentRow(Base):
     __table_args__ = (
         Index("idx_blog_attachments_post_id", "post_id"),
         Index("idx_blog_attachments_stored_name", "stored_name", unique=True),
+        Index("idx_blog_attachments_category", "category"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -77,6 +78,10 @@ class BlogAttachmentRow(Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     title_zh: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     title_en: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="general")
+    description_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    description_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_sample: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

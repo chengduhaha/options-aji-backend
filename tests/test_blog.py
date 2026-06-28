@@ -162,10 +162,17 @@ def test_upload_and_download_pdf(db_session: Session, tmp_path, monkeypatch) -> 
     res = client.post(
         "/api/blog/upload-pdf",
         files={"file": ("示例报告.pdf", pdf_bytes, "application/pdf")},
-        data={"post_id": "post-1", "title_zh": "示例报告"},
+        data={
+            "post_id": "post-1",
+            "title_zh": "示例报告",
+            "category": "daily-report",
+            "description_zh": "每日深度分析",
+            "is_sample": "true",
+        },
     )
     assert res.status_code == 200
     attachment_id = res.json()["attachment"]["id"]
+    assert res.json()["attachment"]["category"] == "daily-report"
 
     row = db_session.get(BlogAttachmentRow, attachment_id)
     assert row is not None
@@ -175,3 +182,31 @@ def test_upload_and_download_pdf(db_session: Session, tmp_path, monkeypatch) -> 
     assert download.status_code == 200
     assert download.content.startswith(b"%PDF")
     assert "filename*=" in download.headers.get("content-disposition", "")
+
+
+def test_standalone_sample_documents(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    client = _admin_client(db_session)
+
+    pdf_bytes = b"%PDF-1.4\n% standalone sample\n"
+    upload = client.post(
+        "/api/blog/upload-pdf",
+        files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        data={
+            "title_zh": "示例异动报告",
+            "category": "unusual",
+            "description_zh": "每日推送",
+            "is_sample": "true",
+        },
+    )
+    assert upload.status_code == 200
+    attachment_id = upload.json()["attachment"]["id"]
+
+    public = client.get("/api/blog/documents")
+    assert public.status_code == 200
+    payload = public.json()
+    assert payload["total"] if "total" in payload else len(payload["items"]) >= 1
+    assert any(item["id"] == attachment_id for item in payload["items"])
+
+    delete = client.delete(f"/api/blog/attachments/{attachment_id}")
+    assert delete.status_code == 204
