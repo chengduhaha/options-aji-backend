@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Annotated, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
@@ -93,6 +94,12 @@ class BlogPostUpdateBody(BaseModel):
 class BlogUploadPdfResponse(BaseModel):
     attachment: BlogAttachmentPublic
     post_id: Optional[str] = None
+
+
+def _content_disposition(disposition: str, filename: str) -> str:
+    safe_ascii = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._") or "document.pdf"
+    encoded = quote(filename)
+    return f'{disposition}; filename="{safe_ascii}"; filename*=UTF-8\'\'{encoded}'
 
 
 def _parse_tags(raw: str) -> list[str]:
@@ -276,7 +283,7 @@ def download_blog_attachment(
         path,
         media_type=row.mime_type,
         filename=row.original_filename,
-        headers={"Content-Disposition": f'{disposition}; filename="{row.original_filename}"'},
+        headers={"Content-Disposition": _content_disposition(disposition, row.original_filename)},
     )
 
 

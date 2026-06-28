@@ -161,7 +161,7 @@ def test_upload_and_download_pdf(db_session: Session, tmp_path, monkeypatch) -> 
     pdf_bytes = b"%PDF-1.4\n% fake pdf for test\n"
     res = client.post(
         "/api/blog/upload-pdf",
-        files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        files={"file": ("示例报告.pdf", pdf_bytes, "application/pdf")},
         data={"post_id": "post-1", "title_zh": "示例报告"},
     )
     assert res.status_code == 200
@@ -174,3 +174,4 @@ def test_upload_and_download_pdf(db_session: Session, tmp_path, monkeypatch) -> 
     download = client.get(f"/api/blog/attachments/{attachment_id}/file")
     assert download.status_code == 200
     assert download.content.startswith(b"%PDF")
+    assert "filename*=" in download.headers.get("content-disposition", "")
