@@ -92,8 +92,8 @@ BOARD_CONFIGS: dict[BoardId, BoardConfig] = {
     ),
     "high-iv": BoardConfig(
         board_id="high-iv",
-        sort_indicator="IV_RANK",
-        sort_scope="underlying",
+        # Futu does not support sort by IV_RANK (205); fetch by IV then re-rank client-side.
+        sort_indicator="IMPLIED_VOLATILITY",
         sort_desc=True,
         underlying_retrieves=("IV_RANK",),
     ),
