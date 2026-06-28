@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from app.db.models_blog import BlogPostRow
+from app.db import models_user  # noqa: F401 — register users table for FK
 from app.db.session import SessionLocal
 
 
