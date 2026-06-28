@@ -58,8 +58,10 @@ class BoardConfig:
     board_id: BoardId
     sort_indicator: str
     sort_desc: bool
+    sort_scope: str = "option"
     filters: tuple[BoardFilter, ...] = ()
     underlying_filters: tuple[BoardFilter, ...] = ()
+    underlying_retrieves: tuple[str, ...] = ()
     limit: int = LEADERBOARD_LIMIT
 
 
@@ -90,8 +92,10 @@ BOARD_CONFIGS: dict[BoardId, BoardConfig] = {
     ),
     "high-iv": BoardConfig(
         board_id="high-iv",
-        sort_indicator="IMPLIED_VOLATILITY",
+        sort_indicator="IV_RANK",
+        sort_scope="underlying",
         sort_desc=True,
+        underlying_retrieves=("IV_RANK",),
     ),
     "high-gamma": BoardConfig(
         board_id="high-gamma",
@@ -166,9 +170,19 @@ def _is_valid_seller_row(row: dict[str, Any]) -> bool:
 
 
 def _post_filter_board_items(board_id: BoardId, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if board_id != "seller":
-        return items
-    return [row for row in items if _is_valid_seller_row(row)]
+    if board_id == "seller":
+        return [row for row in items if _is_valid_seller_row(row)]
+    if board_id == "high-iv":
+        ranked = sorted(
+            items,
+            key=lambda row: (
+                float(row["iv_rank"]) if isinstance(row.get("iv_rank"), (int, float)) else -1.0,
+                float(row["iv"]) if isinstance(row.get("iv"), (int, float)) else -1.0,
+            ),
+            reverse=True,
+        )
+        return ranked
+    return items
 
 
 def _normalize_board_id(board: str) -> BoardId | None:
@@ -188,8 +202,10 @@ def refresh_leaderboard_cache(board: str) -> dict[str, Any]:
     payload = futu.get_option_screen_board(
         sort_indicator=config.sort_indicator,
         sort_desc=config.sort_desc,
+        sort_scope=config.sort_scope,
         option_filters=_filter_dicts(config.filters),
         underlying_filters=_filter_dicts(config.underlying_filters),
+        underlying_retrieves=config.underlying_retrieves,
         limit=config.limit,
     )
     if payload.get("error"):
@@ -253,6 +269,47 @@ def get_leaderboard(
         "latency_ms": cached.get("latency_ms"),
         "updated_at": cached.get("synced_at"),
         "cache_ttl_seconds": TTL_HOT,
+        "error": cached.get("error"),
+    }
+
+
+def get_options_sentiment(*, force_refresh: bool = False) -> dict[str, Any]:
+    """Aggregate call/put volume sentiment from cached volume leaderboard."""
+    cached = get_leaderboard("volume", force_refresh=force_refresh)
+    items: list[dict[str, Any]] = list(cached.get("items") or [])
+
+    calls = [row for row in items if row.get("option_type") == "C" or row.get("contract_type") == "call"]
+    puts = [row for row in items if row.get("option_type") == "P" or row.get("contract_type") == "put"]
+
+    call_volume = sum(int(row.get("volume") or 0) for row in calls)
+    put_volume = sum(int(row.get("volume") or 0) for row in puts)
+    pc_ratio = round(put_volume / call_volume, 4) if call_volume > 0 else None
+
+    def _top_side(rows: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+        sorted_rows = sorted(rows, key=lambda r: int(r.get("volume") or 0), reverse=True)[:limit]
+        out: list[dict[str, Any]] = []
+        for index, row in enumerate(sorted_rows, start=1):
+            out.append(
+                {
+                    "rank": index,
+                    "underlying": row.get("underlying") or "",
+                    "option_type": row.get("option_type") or "?",
+                    "strike": row.get("strike"),
+                    "expiry": row.get("expiry"),
+                    "volume": int(row.get("volume") or 0),
+                    "symbol_masked": row.get("symbol_masked"),
+                }
+            )
+        return out
+
+    return {
+        "call_volume": call_volume,
+        "put_volume": put_volume,
+        "put_call_ratio": pc_ratio,
+        "top_calls": _top_side(calls),
+        "top_puts": _top_side(puts),
+        "updated_at": cached.get("updated_at"),
+        "cache_ttl_seconds": cached.get("cache_ttl_seconds", TTL_HOT),
         "error": cached.get("error"),
     }
 

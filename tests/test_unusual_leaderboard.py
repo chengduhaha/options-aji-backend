@@ -43,6 +43,7 @@ class FakeOptionScreenContext:
                     "sell_annualized_return": 0.42,
                     "sell_profit_probability": 0.68,
                     "itm_probability": 0.32,
+                    "underlying": {"code": "US.SPY", "price": 728.5, "iv_rank": 0.82},
                 },
                 {
                     "code": "US.NVDA260626C00195000",
@@ -104,6 +105,23 @@ def test_get_option_screen_board_volume_sort() -> None:
     fake_ctx = FakeOptionScreenContext()
     client = FutuQuoteClient(enabled=True, ctx_factory=lambda: fake_ctx)
     result = client.get_option_screen_board(sort_indicator="VOLUME", sort_desc=True, limit=50)
+    assert len(result["items"]) == 2
+    assert result["items"][0]["iv_rank"] == 82.0
+    assert fake_ctx.last_request is not None
+
+
+def test_get_option_screen_board_iv_rank_underlying_sort() -> None:
+    from app.clients.futu_client import FutuQuoteClient
+
+    fake_ctx = FakeOptionScreenContext()
+    client = FutuQuoteClient(enabled=True, ctx_factory=lambda: fake_ctx)
+    result = client.get_option_screen_board(
+        sort_indicator="IV_RANK",
+        sort_scope="underlying",
+        sort_desc=True,
+        underlying_retrieves=("IV_RANK",),
+        limit=50,
+    )
     assert len(result["items"]) == 2
     assert fake_ctx.last_request is not None
 

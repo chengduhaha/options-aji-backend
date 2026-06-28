@@ -31,12 +31,13 @@ from app.services.cache_service import (
 )
 from app.services.options_leaderboard import (
     get_leaderboard,
+    get_options_sentiment,
     get_unusual_leaderboard_page,
     refresh_all_leaderboards_cache,
     refresh_leaderboard_cache,
     refresh_unusual_leaderboard_cache,
 )
-from app.services.v3_board_access import apply_leaderboard_access, enforce_gex_symbol_access
+from app.services.v3_board_access import apply_leaderboard_access, apply_sentiment_access, enforce_gex_symbol_access
 from app.tools.openbb_tools import build_default_toolkit
 
 logger = logging.getLogger(__name__)
@@ -454,6 +455,16 @@ def get_options_leaderboard(
     payload = get_leaderboard(board, force_refresh=refresh)
     board_id = str(payload.get("board") or board)
     return apply_leaderboard_access(payload, board_id=board_id, access=access)
+
+
+@router.get("/sentiment")
+def get_options_sentiment_endpoint(
+    refresh: bool = Query(False, description="Force refresh from Futu (admin/debug)"),
+    access: V3Access = Depends(get_v3_access),
+):
+    """Call vs put volume sentiment snapshot from volume leaderboard cache."""
+    payload = get_options_sentiment(force_refresh=refresh)
+    return apply_sentiment_access(payload, access=access)
 
 
 @router.post("/leaderboard/refresh")

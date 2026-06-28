@@ -109,6 +109,20 @@ def apply_leaderboard_access(
     }
 
 
+def apply_sentiment_access(payload: dict[str, Any], *, access: V3Access) -> dict[str, Any]:
+    if access.is_member:
+        return {**payload, "access": _access_meta(access, board_id="volume")}
+
+    top_calls = _apply_symbol_masking(list(payload.get("top_calls") or []))[:FREE_ROW_LIMIT]
+    top_puts = _apply_symbol_masking(list(payload.get("top_puts") or []))[:FREE_ROW_LIMIT]
+    return {
+        **payload,
+        "top_calls": top_calls,
+        "top_puts": top_puts,
+        "access": _access_meta(access, board_id="volume"),
+    }
+
+
 def enforce_gex_symbol_access(symbol: str, access: V3Access) -> None:
     sym = symbol.strip().upper()
     if access.is_member:

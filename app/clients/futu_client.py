@@ -710,8 +710,10 @@ class FutuQuoteClient:
         *,
         sort_indicator: str,
         sort_desc: bool = True,
+        sort_scope: str = "option",
         option_filters: list[dict[str, Any]] | None = None,
         underlying_filters: list[dict[str, Any]] | None = None,
+        underlying_retrieves: tuple[str, ...] | None = None,
         limit: int = 150,
     ) -> dict[str, Any]:
         """Fetch a ranked US options board via Futu get_option_screen."""
@@ -730,15 +732,22 @@ class FutuQuoteClient:
                     for name in dir(OptUnderlyingIndicator)
                     if name.isupper()
                 }
-                sort_key = indicator_map.get(sort_indicator.upper())
+                scope = sort_scope.strip().lower()
+                sort_map = underlying_map if scope == "underlying" else indicator_map
+                sort_key = sort_map.get(sort_indicator.upper())
                 if sort_key is None:
-                    raise ValueError(f"unknown_sort_indicator:{sort_indicator}")
+                    raise ValueError(f"unknown_sort_indicator:{sort_indicator}:{scope}")
 
                 request = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
                 # Populate row["underlying"]["price"] for moneyness + strike sanity checks.
                 stock_price_key = underlying_map.get("STOCK_PRICE")
                 if stock_price_key is not None:
                     request.add_underlying_retrieve(stock_price_key)
+
+                for retrieve_name in underlying_retrieves or ():
+                    retrieve_key = underlying_map.get(str(retrieve_name).upper())
+                    if retrieve_key is not None:
+                        request.add_underlying_retrieve(retrieve_key)
 
                 for filt in underlying_filters or []:
                     indicator_name = str(filt.get("indicator") or "").upper()
@@ -818,6 +827,7 @@ class FutuQuoteClient:
         underlying_info = row.get("underlying")
         underlying = None
         spot: float | None = None
+        iv_rank_pct: float | None = None
         if isinstance(underlying_info, dict):
             owner_code = underlying_info.get("code") or underlying_info.get("stock_code")
             if owner_code:
@@ -825,6 +835,9 @@ class FutuQuoteClient:
             spot_raw = underlying_info.get("price")
             if isinstance(spot_raw, (int, float)) and spot_raw > 0:
                 spot = float(spot_raw)
+            iv_rank_raw = _safe_float(underlying_info.get("iv_rank"))
+            if iv_rank_raw is not None:
+                iv_rank_pct = round(iv_rank_raw * 100.0, 2) if iv_rank_raw <= 1 else round(iv_rank_raw, 2)
         if not underlying:
             underlying = option_name.split()[0] if option_name else display_symbol_from_futu_code(code)
 
@@ -912,6 +925,7 @@ class FutuQuoteClient:
             "premium": premium,
             "price": price,
             "iv": iv_pct,
+            "iv_rank": iv_rank_pct,
             "hv": hv_pct,
             "iv_hv": iv_hv,
             "delta": _safe_float(row.get("delta")),
