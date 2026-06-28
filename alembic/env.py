@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 from app.config import get_settings
 from app.db.models import Base
 from app.db import models_user  # noqa: F401
+from app.db import models_blog  # noqa: F401
 
 config = context.config
 

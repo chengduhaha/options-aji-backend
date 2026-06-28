@@ -189,6 +189,8 @@ class Settings(BaseSettings):
 
     # ── Misc ─────────────────────────────────────────────────────────────────
     openbb_api_key: str = ""
+    #: Local directory for blog PDF uploads (persisted on backend host).
+    blog_upload_dir: str = "./data/blog/pdfs"
     twitter_api_io_key: str = ""
     xpoz_api_key: str = ""
     xpoz_base_url: str = "https://api.xpoz.ai/v1"

@@ -63,3 +63,22 @@ async def get_current_admin_user(
             detail={"code": "forbidden", "message": "需要管理员权限。"},
         )
     return user
+
+
+async def get_optional_admin_user(
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    session: Session = Depends(db_session_dep),
+) -> Optional[UserRow]:
+    token = extract_bearer_user_token(authorization)
+    if not token:
+        return None
+    payload = decode_access_token(token)
+    if payload is None:
+        return None
+    sub = payload.get("sub")
+    if not isinstance(sub, str) or not sub.strip():
+        return None
+    row = session.execute(select(UserRow).where(UserRow.id == sub)).scalar_one_or_none()
+    if row is None or row.role != "admin" or row.role == "disabled":
+        return None
+    return row
