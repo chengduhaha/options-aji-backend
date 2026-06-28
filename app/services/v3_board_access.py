@@ -11,7 +11,8 @@ from app.services.membership import (
     FREE_GEX_SYMBOL,
     FREE_ROW_LIMIT,
     FREE_SYMBOL_MASK_RANKS,
-    MEMBER_UNUSUAL_ROW_LIMIT,
+    MEMBER_LEADERBOARD_MAX_PAGES,
+    MEMBER_LEADERBOARD_ROW_LIMIT,
     V3Access,
 )
 
@@ -24,25 +25,14 @@ def _free_allowed_filters(board_id: str) -> list[str]:
 
 def _access_meta(access: V3Access, *, board_id: str) -> dict[str, Any]:
     if access.is_member:
-        if board_id == "unusual":
-            return {
-                "tier": access.tier,
-                "is_member": True,
-                "locked": False,
-                "row_limit": MEMBER_UNUSUAL_ROW_LIMIT,
-                "allowed_filters": ["cp", "dte", "moneyness", "topN", "page"],
-                "allowed_top_n": [10, 25],
-                "max_pages": 10,
-                "symbol_mask_ranks": 0,
-            }
         return {
             "tier": access.tier,
             "is_member": True,
             "locked": False,
-            "row_limit": None,
+            "row_limit": MEMBER_LEADERBOARD_ROW_LIMIT,
             "allowed_filters": ["cp", "dte", "moneyness", "topN", "page"],
             "allowed_top_n": [10, 25],
-            "max_pages": None,
+            "max_pages": MEMBER_LEADERBOARD_MAX_PAGES,
             "symbol_mask_ranks": 0,
         }
 
@@ -88,8 +78,7 @@ def apply_leaderboard_access(
     items: list[Any] = list(payload.get("items") or [])
 
     if access.is_member:
-        if board_id == "unusual":
-            items = items[:MEMBER_UNUSUAL_ROW_LIMIT]
+        items = items[:MEMBER_LEADERBOARD_ROW_LIMIT]
         return {
             **payload,
             "items": items,

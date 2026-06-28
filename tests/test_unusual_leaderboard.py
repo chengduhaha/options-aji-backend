@@ -128,26 +128,28 @@ def test_get_option_screen_board_iv_rank_underlying_sort() -> None:
 
 def test_unusual_leaderboard_pagination(monkeypatch) -> None:
     from app.services import options_leaderboard as svc
+    from app.services.membership import MEMBER_LEADERBOARD_MAX_PAGES, MEMBER_LEADERBOARD_ROW_LIMIT
 
-    sample_items = [{"rank": i, "code": f"C{i}"} for i in range(1, 101)]
+    sample_items = [{"rank": i, "code": f"C{i}"} for i in range(1, MEMBER_LEADERBOARD_ROW_LIMIT + 1)]
     sample = {
         "board": "unusual",
         "items": sample_items,
-        "total": 100,
+        "total": MEMBER_LEADERBOARD_ROW_LIMIT,
         "universe_count": 5000,
         "synced_at": "2026-06-26T14:12:00+00:00",
     }
     monkeypatch.setattr(svc, "cache_get", lambda _key: sample)
 
     page1 = svc.get_unusual_leaderboard_page(page=1, page_size=10)
-    page10 = svc.get_unusual_leaderboard_page(page=10, page_size=10)
+    page30 = svc.get_unusual_leaderboard_page(page=MEMBER_LEADERBOARD_MAX_PAGES, page_size=10)
 
     assert len(page1["contracts"]) == 10
     assert page1["contracts"][0]["rank"] == 1
     assert page1["page"] == 1
-    assert page1["total_pages"] == 10
-    assert len(page10["contracts"]) == 10
-    assert page10["contracts"][0]["rank"] == 91
+    assert page1["total_pages"] == MEMBER_LEADERBOARD_MAX_PAGES
+    assert page1["total"] == MEMBER_LEADERBOARD_ROW_LIMIT
+    assert len(page30["contracts"]) == 10
+    assert page30["contracts"][0]["rank"] == 291
 
 
 def test_get_leaderboard_returns_full_cache(monkeypatch) -> None:

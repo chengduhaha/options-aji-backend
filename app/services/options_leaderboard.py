@@ -23,7 +23,7 @@ BoardId = Literal[
     "liquidity",
 ]
 
-LEADERBOARD_LIMIT = 150
+LEADERBOARD_LIMIT = 300
 LEADERBOARD_STAGGER_SECONDS = 1.5
 UNUSUAL_VOL_OI_MIN = 3.0
 UNUSUAL_VOLUME_MIN = 500
@@ -333,23 +333,34 @@ def get_unusual_leaderboard_page(
     force_refresh: bool = False,
 ) -> dict[str, Any]:
     del vol_oi_min, volume_min
-    page = max(1, min(page, 10))
-    page_size = max(1, min(page_size, 10))
+    from app.services.membership import (
+        MEMBER_LEADERBOARD_MAX_PAGES,
+        MEMBER_LEADERBOARD_PAGE_SIZE,
+        MEMBER_LEADERBOARD_ROW_LIMIT,
+    )
+
+    page = max(1, min(page, MEMBER_LEADERBOARD_MAX_PAGES))
+    page_size = max(1, min(page_size, MEMBER_LEADERBOARD_PAGE_SIZE))
     cached = get_leaderboard("unusual", force_refresh=force_refresh)
     items = list(cached.get("items") or [])
-    total = min(len(items), 100)
+    total = min(len(items), MEMBER_LEADERBOARD_ROW_LIMIT)
     start = (page - 1) * page_size
     end = start + page_size
+    total_pages = max(1, min(MEMBER_LEADERBOARD_MAX_PAGES, (total + page_size - 1) // page_size))
     return {
         "contracts": items[start:end],
         "page": page,
         "page_size": page_size,
         "total": total,
-        "total_pages": 10,
+        "total_pages": total_pages,
         "universe_count": cached.get("universe_count"),
         "latency_ms": cached.get("latency_ms"),
         "synced_at": cached.get("updated_at"),
         "cache_ttl_seconds": cached.get("cache_ttl_seconds", TTL_HOT),
-        "filters": {"vol_oi_min": UNUSUAL_VOL_OI_MIN, "volume_min": UNUSUAL_VOLUME_MIN, "limit": 100},
+        "filters": {
+            "vol_oi_min": UNUSUAL_VOL_OI_MIN,
+            "volume_min": UNUSUAL_VOLUME_MIN,
+            "limit": MEMBER_LEADERBOARD_ROW_LIMIT,
+        },
         "error": cached.get("error"),
     }

@@ -488,13 +488,13 @@ def refresh_leaderboard_endpoint(board: str):
 
 @router.get("/unusual-leaderboard")
 def get_unusual_leaderboard(
-    page: int = Query(1, ge=1, le=10),
+    page: int = Query(1, ge=1, le=30),
     limit: int = Query(10, ge=1, le=10),
     vol_oi_min: float = Query(3.0, ge=0),
     volume_min: int = Query(500, ge=0),
     refresh: bool = Query(False, description="Force refresh from Futu (admin/debug)"),
 ):
-    """Top 100 unusual US options from Futu get_option_screen; paginated 10 per page."""
+    """Top 300 unusual US options from Futu get_option_screen; paginated 10 per page."""
     return get_unusual_leaderboard_page(
         page=page,
         page_size=limit,

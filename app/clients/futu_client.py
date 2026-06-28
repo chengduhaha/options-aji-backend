@@ -720,7 +720,7 @@ class FutuQuoteClient:
         if not self.enabled:
             return {"items": [], "contracts": [], "universe_count": 0, "error": "futu_not_enabled"}
 
-        capped_limit = max(1, min(int(limit), 200))
+        capped_limit = max(1, min(int(limit), 300))
         started = time.monotonic()
         try:
             with self._borrow_context() as context:
