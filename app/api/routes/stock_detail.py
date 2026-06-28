@@ -596,21 +596,13 @@ def stock_gex(
     access: V3Access = Depends(get_v3_access),
     _: Optional[str] = Depends(bearer_subscription_optional),
 ) -> dict[str, object]:
-    from app.api.routes.options import _compute_gex_profile_from_db
+    from app.api.routes.options import _finalize_gex_response, _resolve_gex_profile
 
     sym = symbol.strip().upper()
     enforce_gex_symbol_access(sym, access)
     cached = cache_get(key_gex(sym))
     if isinstance(cached, dict) and isinstance(cached.get("netGex"), (int, float)):
+        record_gex_snapshot(sym, dict(cached))
         return cached
 
-    result = _compute_gex_profile_from_db(sym, limit=500)
-    if result is None:
-        tk = build_default_toolkit()
-        result = tk.get_gex(sym)
-    elif not result.get("error"):
-        cache_set(key_gex(sym), result, ttl=TTL_HOT)
-
-    if isinstance(result, dict) and isinstance(result.get("netGex"), (int, float)):
-        record_gex_snapshot(sym, result)
-    return result
+    return _finalize_gex_response(sym, _resolve_gex_profile(sym, limit=500))

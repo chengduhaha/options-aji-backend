@@ -50,22 +50,47 @@ def _query_default(value, fallback):
     return value
 
 
-def _compute_gex_profile_from_db(sym: str, *, limit: int) -> dict[str, object] | None:
+def _compute_gex_profile_from_db(
+    sym: str,
+    *,
+    limit: int,
+    strike_window_pct: float = 0.2,
+) -> dict[str, object] | None:
     with SessionLocal() as session:
-        rows = session.execute(
+        spot_row = session.execute(
+            select(OptionsSnapshotRow.underlying_price)
+            .where(OptionsSnapshotRow.underlying_ticker == sym)
+            .where(OptionsSnapshotRow.underlying_price > 0)
+            .order_by(OptionsSnapshotRow.snapshot_time.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        spot = float(spot_row) if isinstance(spot_row, (int, float)) and spot_row > 0 else 0.0
+
+        stmt = (
             select(OptionsSnapshotRow)
             .where(OptionsSnapshotRow.underlying_ticker == sym)
             .where(OptionsSnapshotRow.open_interest > 0)
-            .order_by(OptionsSnapshotRow.day_volume.desc())
-            .limit(limit)
-        ).scalars().all()
+        )
+        if spot > 0:
+            low = spot * (1.0 - strike_window_pct)
+            high = spot * (1.0 + strike_window_pct)
+            stmt = stmt.where(
+                OptionsSnapshotRow.strike_price >= low,
+                OptionsSnapshotRow.strike_price <= high,
+            ).order_by(func.abs(OptionsSnapshotRow.strike_price - spot))
+        else:
+            stmt = stmt.order_by(OptionsSnapshotRow.open_interest.desc())
+        rows = session.execute(stmt.limit(limit)).scalars().all()
     if not rows:
         return None
-    spot = 0.0
+    if spot <= 0:
+        for row in rows:
+            up = getattr(row, "underlying_price", None)
+            if isinstance(up, (int, float)) and up > 0:
+                spot = float(up)
+                break
     contracts: list[dict[str, object]] = []
     for row in rows:
-        if spot <= 0 and isinstance(getattr(row, "underlying_price", None), (int, float)):
-            spot = float(row.underlying_price)
         exp = getattr(row, "expiration_date", None)
         contracts.append(
             {
@@ -86,6 +111,68 @@ def _compute_gex_profile_from_db(sym: str, *, limit: int) -> dict[str, object] |
         return None
     result["source"] = "database_gamma_estimate"
     result["spotSource"] = "options_snapshots"
+    result["contractCount"] = len(contracts)
+    return result
+
+
+def _fetch_gex_futu_live(
+    sym: str,
+    *,
+    limit: int,
+    strike_window_pct: float,
+) -> dict[str, object] | None:
+    cfg = get_settings()
+    if not getattr(cfg, "futu_enabled", False):
+        return None
+    try:
+        futu = get_futu_client()
+        quote = futu.get_stock_quote(sym)
+        spot = quote.get("last_price") if isinstance(quote, dict) else None
+        if not (isinstance(spot, (int, float)) and spot > 0):
+            return None
+        chain = futu.get_option_chain_snapshot(
+            sym,
+            strike_price_gte=round(float(spot) * (1.0 - strike_window_pct), 4),
+            strike_price_lte=round(float(spot) * (1.0 + strike_window_pct), 4),
+            limit=limit,
+        )
+        contracts = chain.get("contracts") if isinstance(chain, dict) else None
+        if not isinstance(contracts, list) or not contracts:
+            return None
+        result = compute_gex_profile_from_contracts(sym, contracts=contracts, spot=float(spot))
+        if result.get("error"):
+            return None
+        result["source"] = "futu_realtime_gamma_estimate"
+        result["spotSource"] = "futu_quote"
+        result["contractCount"] = len(contracts)
+        return result
+    except Exception as exc:
+        logger.warning("Futu live GEX failed for %s: %s", sym, exc)
+        return None
+
+
+def _resolve_gex_profile(
+    sym: str,
+    *,
+    limit: int = 500,
+    strike_window_pct: float = 0.2,
+) -> dict[str, object]:
+    """Resolve GEX: Futu live → DB warm → yfinance last resort."""
+    futu_result = _fetch_gex_futu_live(sym, limit=limit, strike_window_pct=strike_window_pct)
+    if futu_result is not None:
+        return futu_result
+
+    db_result = _compute_gex_profile_from_db(sym, limit=limit, strike_window_pct=strike_window_pct)
+    if db_result is not None:
+        return db_result
+
+    return compute_gex_profile(sym, skip_futu=True)
+
+
+def _finalize_gex_response(sym: str, result: dict[str, object]) -> dict[str, object]:
+    if not result.get("error") and isinstance(result.get("netGex"), (int, float)):
+        cache_set(key_gex(sym), result, ttl=TTL_HOT)
+        record_gex_snapshot(sym, dict(result))
     return result
 
 
@@ -343,26 +430,11 @@ def get_gex(
         cached_rt = cache_get(rt_key)
         if isinstance(cached_rt, dict) and isinstance(cached_rt.get("netGex"), (int, float)):
             return cached_rt
-        try:
-            futu = get_futu_client()
-            quote = futu.get_stock_quote(sym)
-            spot = quote.get("last_price") if isinstance(quote, dict) else None
-            if isinstance(spot, (int, float)) and spot > 0:
-                chain = futu.get_option_chain_snapshot(
-                    sym,
-                    strike_price_gte=round(float(spot) * (1.0 - strike_window_pct), 4),
-                    strike_price_lte=round(float(spot) * (1.0 + strike_window_pct), 4),
-                    limit=limit,
-                )
-                contracts = chain.get("contracts") if isinstance(chain, dict) else None
-                if isinstance(contracts, list) and contracts:
-                    result = compute_gex_profile_from_contracts(sym, contracts=contracts, spot=float(spot))
-                    if not result.get("error"):
-                        cache_set(rt_key, result, ttl=cfg.futu_cache_ttl_seconds)
-                        record_gex_snapshot(sym, dict(result))
-                        return result
-        except Exception as exc:
-            logger.warning("Realtime Futu GEX failed for %s: %s", sym, exc)
+        rt_result = _fetch_gex_futu_live(sym, limit=limit, strike_window_pct=strike_window_pct)
+        if rt_result is not None:
+            cache_set(rt_key, rt_result, ttl=cfg.futu_cache_ttl_seconds)
+            record_gex_snapshot(sym, dict(rt_result))
+            return rt_result
 
     cached = cache_get(key_gex(sym))
     if cached:
@@ -370,13 +442,10 @@ def get_gex(
             record_gex_snapshot(sym, dict(cached))
         return cached
 
-    result = _compute_gex_profile_from_db(sym, limit=limit)
-    if result is None:
-        result = compute_gex_profile(sym)
-    if not result.get("error"):
-        cache_set(key_gex(sym), result, ttl=TTL_HOT)
-        record_gex_snapshot(sym, dict(result))
-    return result
+    return _finalize_gex_response(
+        sym,
+        _resolve_gex_profile(sym, limit=limit, strike_window_pct=strike_window_pct),
+    )
 
 
 @router.get("/gex/history/{symbol}")

@@ -96,7 +96,12 @@ class GexStrikeRow:
     iv: float
 
 
-def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, object]:
+def compute_gex_profile(
+    symbol: str,
+    *,
+    max_strikes: int = 45,
+    skip_futu: bool = False,
+) -> dict[str, object]:
     """Return keys aligned with frontend `GexProfile` (camelCase added in router if needed)."""
 
     guard = symbol.strip().upper()
@@ -104,7 +109,7 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
         return {"symbol": "", "error": "empty_symbol"}
 
     cfg = get_settings()
-    if getattr(cfg, "futu_enabled", False):
+    if not skip_futu and getattr(cfg, "futu_enabled", False):
         futu_fail_reason = "unknown"
         try:
             futu = get_futu_client()
@@ -130,6 +135,7 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
                         futu_fail_reason = f"gex_compute:{out.get('error')}"
                     else:
                         out["spotSource"] = "futu_quote"
+                        out["contractCount"] = len(contracts)
                         return out
         except Exception as exc:
             futu_fail_reason = f"exception:{exc}"
@@ -284,6 +290,12 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
         for r in sorted(rows, key=lambda x: x.strike)
     ]
 
+    contract_count = 0
+    if calls is not None and not calls.empty:
+        contract_count += len(calls)
+    if puts is not None and not puts.empty:
+        contract_count += len(puts)
+
     ts = dt.datetime.now(dt.timezone.utc).isoformat()
     return {
         "symbol": guard,
@@ -299,6 +311,7 @@ def compute_gex_profile(symbol: str, *, max_strikes: int = 45) -> dict[str, obje
         "underlyingPrice": round(spot, 2),
         "spotSource": spot_source,
         "source": "yfinance_local_gamma_estimate",
+        "contractCount": contract_count,
     }
 
 
@@ -404,6 +417,7 @@ def compute_gex_profile_from_contracts(
         "underlyingPrice": round(spot, 2),
         "spotSource": "futu_quote",
         "source": "futu_realtime_gamma_estimate",
+        "contractCount": len(contracts),
     }
 
 
