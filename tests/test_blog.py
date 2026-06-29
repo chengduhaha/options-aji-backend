@@ -252,7 +252,10 @@ def test_member_documents_include_non_sample_standalone_pdfs(db_session: Session
     )
     guest_res = guest.get("/api/blog/documents")
     assert guest_res.status_code == 200
-    assert all(item["id"] != "member-doc-1" for item in guest_res.json()["items"])
+    guest_items = guest_res.json()["items"]
+    assert len(guest_items) == 1
+    assert guest_items[0]["id"] == "member-doc-1"
+    assert guest_items[0]["is_preview"] is True
 
     member = _client_with_access(
         db_session,
@@ -266,9 +269,78 @@ def test_member_documents_include_non_sample_standalone_pdfs(db_session: Session
     assert "market-report" in payload["categories"]
 
 
+def test_guest_teaser_thirty_percent_per_category(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    now = dt.datetime.now(dt.timezone.utc)
+    store_pdf = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf
+
+    for index in range(10):
+        stored_name, _ = store_pdf(
+            content=f"%PDF-1.4\n% course {index}\n".encode(),
+            original_filename=f"course-{index:02d}.pdf",
+        )
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"course-doc-{index}",
+                stored_name=stored_name,
+                original_filename=f"course-{index:02d}.pdf",
+                mime_type="application/pdf",
+                file_size=32,
+                title_zh=f"课程 {index}",
+                category="course",
+                is_sample=False,
+                created_at=now - dt.timedelta(days=index),
+            )
+        )
+
+    for index in range(4):
+        stored_name, _ = store_pdf(
+            content=f"%PDF-1.4\n% unusual {index}\n".encode(),
+            original_filename=f"unusual-{index}.pdf",
+        )
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"unusual-doc-{index}",
+                stored_name=stored_name,
+                original_filename=f"unusual-{index}.pdf",
+                mime_type="application/pdf",
+                file_size=32,
+                title_zh=f"异动 {index}",
+                category="unusual-flow",
+                is_sample=False,
+                created_at=now - dt.timedelta(hours=index),
+            )
+        )
+    db_session.commit()
+
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    res = guest.get("/api/blog/documents")
+    assert res.status_code == 200
+    payload = res.json()
+    visible_ids = {item["id"] for item in payload["items"]}
+    assert len([item for item in payload["items"] if item["category"] == "course"]) == 3
+    assert len([item for item in payload["items"] if item["category"] == "unusual-flow"]) == 2
+    assert all(item["is_preview"] for item in payload["items"])
+    assert "course" in payload["categories"]
+    assert "unusual-flow" in payload["categories"]
+
+    newest_course_ids = {f"course-doc-{index}" for index in range(3)}
+    assert newest_course_ids.issubset(visible_ids)
+
+    locked = guest.get("/api/blog/attachments/course-doc-9/file")
+    assert locked.status_code == 404
+    preview = guest.get("/api/blog/attachments/course-doc-0/file")
+    assert preview.status_code == 200
+
+
 def test_member_only_pdf_download_requires_member_access(db_session: Session, tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
-    stored_name, _ = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf(
+    now = dt.datetime.now(dt.timezone.utc)
+    store_pdf = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf
+    stored_name, _ = store_pdf(
         content=b"%PDF-1.4\n% locked pdf\n",
         original_filename="locked-report.pdf",
     )
@@ -282,15 +354,35 @@ def test_member_only_pdf_download_requires_member_access(db_session: Session, tm
             title_zh="锁定报告",
             category="market-report",
             is_sample=False,
+            created_at=now,
         )
     )
+    for index in range(4):
+        extra_name, _ = store_pdf(
+            content=f"%PDF-1.4\n% extra {index}\n".encode(),
+            original_filename=f"extra-{index}.pdf",
+        )
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"extra-doc-{index}",
+                stored_name=extra_name,
+                original_filename=f"extra-{index}.pdf",
+                mime_type="application/pdf",
+                file_size=24,
+                title_zh=f"额外 {index}",
+                category="market-report",
+                is_sample=False,
+                created_at=now - dt.timedelta(days=index + 1),
+            )
+        )
     db_session.commit()
 
     guest = _client_with_access(
         db_session,
         V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
     )
-    assert guest.get("/api/blog/attachments/locked-doc-1/file").status_code == 404
+    assert guest.get("/api/blog/attachments/locked-doc-1/file").status_code == 200
+    assert guest.get("/api/blog/attachments/extra-doc-3/file").status_code == 404
 
     member = _client_with_access(
         db_session,

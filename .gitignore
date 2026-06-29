@@ -30,6 +30,9 @@ data/graph_snapshots/*.json
 data/kol_avatars/*
 !data/kol_avatars/.gitkeep
 
+# Blog PDF uploads (runtime; import via scripts/import_baidu_blog_documents.py)
+data/blog/
+
 # Local dev: scripts/backend.sh background run
 .backend.pid
 .backend.log

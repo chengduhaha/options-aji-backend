@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -39,6 +40,7 @@ class BaiduNetdiskFile:
     filename: str
     size: int
     md5: str = ""
+    server_mtime: int = 0
 
     @property
     def dedupe_key(self) -> tuple[str, int]:
@@ -195,6 +197,7 @@ def list_baidu_pdfs(
                         filename=filename,
                         size=int(row.get("size") or 0),
                         md5=str(row.get("md5") or ""),
+                        server_mtime=int(row.get("server_mtime") or 0),
                     )
                 )
             if not payload.get("has_more"):
@@ -292,6 +295,9 @@ def import_baidu_documents(
             raise RuntimeError(f"Missing download link for {item.file.path}.")
         content = download_pdf_content(token=token, dlink=dlink, expected_size=item.file.size)
         stored_name, _ = store_pdf(content=content, original_filename=item.file.filename)
+        created_at = None
+        if item.file.server_mtime > 0:
+            created_at = datetime.fromtimestamp(item.file.server_mtime, tz=timezone.utc)
         session.add(
             BlogAttachmentRow(
                 post_id=None,
@@ -303,6 +309,7 @@ def import_baidu_documents(
                 category=item.category,
                 description_zh=item.description_zh,
                 is_sample=False,
+                created_at=created_at,
             )
         )
         imported_count += 1

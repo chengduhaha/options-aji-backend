@@ -1,7 +1,9 @@
 """Public blog + admin CRUD for personal IP content."""
 from __future__ import annotations
 
+import math
 import re
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 from urllib.parse import quote
@@ -36,6 +38,7 @@ class BlogAttachmentPublic(BaseModel):
     description_zh: Optional[str] = None
     description_en: Optional[str] = None
     is_sample: bool = True
+    is_preview: bool = False
     post_id: Optional[str] = None
     download_url: str
     view_url: str
@@ -152,7 +155,14 @@ def _attachment_urls(attachment: BlogAttachmentRow) -> tuple[str, str]:
     return base, base
 
 
-def _to_attachment_public(attachment: BlogAttachmentRow) -> BlogAttachmentPublic:
+_GUEST_TEASER_FRACTION = 0.3
+
+
+def _to_attachment_public(
+    attachment: BlogAttachmentRow,
+    *,
+    is_preview: bool = False,
+) -> BlogAttachmentPublic:
     download_url, view_url = _attachment_urls(attachment)
     return BlogAttachmentPublic(
         id=attachment.id,
@@ -165,11 +175,39 @@ def _to_attachment_public(attachment: BlogAttachmentRow) -> BlogAttachmentPublic
         description_zh=attachment.description_zh,
         description_en=attachment.description_en,
         is_sample=attachment.is_sample,
+        is_preview=is_preview,
         post_id=attachment.post_id,
         download_url=download_url,
         view_url=view_url,
         created_at=attachment.created_at,
     )
+
+
+def _guest_teaser_ids(session: Session, *, category: Optional[str] = None) -> set[str]:
+    """Newest ceil(30%) of standalone docs per category visible to guests."""
+    filters = [BlogAttachmentRow.post_id.is_(None)]
+    if category:
+        filters.append(BlogAttachmentRow.category == category.strip())
+
+    rows = (
+        session.execute(
+            select(BlogAttachmentRow)
+            .where(*filters)
+            .order_by(BlogAttachmentRow.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    by_category: dict[str, list[BlogAttachmentRow]] = defaultdict(list)
+    for row in rows:
+        by_category[row.category or "general"].append(row)
+
+    visible: set[str] = set()
+    for cat_rows in by_category.values():
+        take = max(1, math.ceil(len(cat_rows) * _GUEST_TEASER_FRACTION))
+        for row in cat_rows[:take]:
+            visible.add(row.id)
+    return visible
 
 
 def _attachment_is_public(
@@ -179,7 +217,9 @@ def _attachment_is_public(
     access: Optional[V3Access] = None,
 ) -> bool:
     if attachment.post_id is None:
-        return attachment.is_sample or admin is not None or bool(access and access.is_member)
+        if admin is not None or bool(access and access.is_member):
+            return True
+        return attachment.id in _guest_teaser_ids(session)
     post = session.get(BlogPostRow, attachment.post_id)
     if post is None:
         return admin is not None
@@ -335,26 +375,45 @@ def list_blog_documents(
     category: Optional[str] = Query(default=None),
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
-    """Standalone PDF documents: public samples for guests, full archive for members."""
-    filters = [BlogAttachmentRow.post_id.is_(None)]
-    if not access.is_member:
-        filters.append(BlogAttachmentRow.is_sample.is_(True))
-    if category:
-        filters.append(BlogAttachmentRow.category == category.strip())
-
-    rows = (
-        session.execute(
-            select(BlogAttachmentRow)
-            .where(*filters)
-            .order_by(BlogAttachmentRow.created_at.desc())
+    """Standalone PDF documents: ~30% teaser per category for guests, full archive for members."""
+    standalone = [BlogAttachmentRow.post_id.is_(None)]
+    if access.is_member:
+        filters = list(standalone)
+        if category:
+            filters.append(BlogAttachmentRow.category == category.strip())
+        rows = (
+            session.execute(
+                select(BlogAttachmentRow)
+                .where(*filters)
+                .order_by(BlogAttachmentRow.created_at.desc())
+            )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
+        items = [_to_attachment_public(r) for r in rows]
+    else:
+        teaser_ids = _guest_teaser_ids(session, category=category)
+        if not teaser_ids:
+            rows = []
+        else:
+            filters = [*standalone, BlogAttachmentRow.id.in_(teaser_ids)]
+            if category:
+                filters.append(BlogAttachmentRow.category == category.strip())
+            rows = (
+                session.execute(
+                    select(BlogAttachmentRow)
+                    .where(*filters)
+                    .order_by(BlogAttachmentRow.created_at.desc())
+                )
+                .scalars()
+                .all()
+            )
+        items = [_to_attachment_public(r, is_preview=True) for r in rows]
+
     categories = (
         session.execute(
             select(BlogAttachmentRow.category)
-            .where(*(filters[:1] if access.is_member else filters[:2]))
+            .where(*standalone)
             .distinct()
             .order_by(BlogAttachmentRow.category)
         )
@@ -362,7 +421,7 @@ def list_blog_documents(
         .all()
     )
     return BlogDocumentListResponse(
-        items=[_to_attachment_public(r) for r in rows],
+        items=items,
         categories=[c for c in categories if c],
         access=membership_public_fields(access),
     )
