@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.deps_auth import get_current_admin_user
+from app.api.deps_membership import get_v3_access
 from app.db.models import Base
 from app.db.models_blog import BlogAttachmentRow, BlogPostRow
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
 from app.main import create_application
+from app.services.membership import V3Access
 
 
 @pytest.fixture()
@@ -80,6 +82,17 @@ def _admin_client(session: Session) -> TestClient:
 
     app.dependency_overrides[db_session_dep] = _override_db
     app.dependency_overrides[get_current_admin_user] = lambda: admin
+    return TestClient(app)
+
+
+def _client_with_access(session: Session, access: V3Access) -> TestClient:
+    app = create_application()
+
+    def _override_db() -> Generator[Session, None, None]:
+        yield session
+
+    app.dependency_overrides[db_session_dep] = _override_db
+    app.dependency_overrides[get_v3_access] = lambda: access
     return TestClient(app)
 
 
@@ -210,3 +223,79 @@ def test_standalone_sample_documents(db_session: Session, tmp_path, monkeypatch)
 
     delete = client.delete(f"/api/blog/attachments/{attachment_id}")
     assert delete.status_code == 204
+
+
+def test_member_documents_include_non_sample_standalone_pdfs(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    stored_name, _ = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf(
+        content=b"%PDF-1.4\n% member pdf\n",
+        original_filename="member-report.pdf",
+    )
+    db_session.add(
+        BlogAttachmentRow(
+            id="member-doc-1",
+            stored_name=stored_name,
+            original_filename="member-report.pdf",
+            mime_type="application/pdf",
+            file_size=24,
+            title_zh="会员报告",
+            category="market-report",
+            description_zh="仅会员可见",
+            is_sample=False,
+        )
+    )
+    db_session.commit()
+
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    guest_res = guest.get("/api/blog/documents")
+    assert guest_res.status_code == 200
+    assert all(item["id"] != "member-doc-1" for item in guest_res.json()["items"])
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    member_res = member.get("/api/blog/documents")
+    assert member_res.status_code == 200
+    payload = member_res.json()
+    assert payload["access"]["is_member"] is True
+    assert any(item["id"] == "member-doc-1" for item in payload["items"])
+    assert "market-report" in payload["categories"]
+
+
+def test_member_only_pdf_download_requires_member_access(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    stored_name, _ = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf(
+        content=b"%PDF-1.4\n% locked pdf\n",
+        original_filename="locked-report.pdf",
+    )
+    db_session.add(
+        BlogAttachmentRow(
+            id="locked-doc-1",
+            stored_name=stored_name,
+            original_filename="locked-report.pdf",
+            mime_type="application/pdf",
+            file_size=24,
+            title_zh="锁定报告",
+            category="market-report",
+            is_sample=False,
+        )
+    )
+    db_session.commit()
+
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    assert guest.get("/api/blog/attachments/locked-doc-1/file").status_code == 404
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    download = member.get("/api/blog/attachments/locked-doc-1/file")
+    assert download.status_code == 200
+    assert download.content.startswith(b"%PDF")

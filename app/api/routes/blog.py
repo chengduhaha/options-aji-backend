@@ -13,10 +13,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps_auth import get_current_admin_user, get_optional_admin_user
+from app.api.deps_membership import get_v3_access
 from app.db.models_blog import BlogAttachmentRow, BlogPostRow
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
 from app.services.blog_storage import BlogStorageError, delete_pdf, resolve_pdf_path, store_pdf
+from app.services.membership import V3Access, membership_public_fields
 
 router = APIRouter(tags=["blog"])
 
@@ -43,6 +45,7 @@ class BlogAttachmentPublic(BaseModel):
 class BlogDocumentListResponse(BaseModel):
     items: list[BlogAttachmentPublic]
     categories: list[str] = Field(default_factory=list)
+    access: dict[str, object] = Field(default_factory=dict)
 
 class BlogPostSummary(BaseModel):
     id: str
@@ -169,9 +172,14 @@ def _to_attachment_public(attachment: BlogAttachmentRow) -> BlogAttachmentPublic
     )
 
 
-def _attachment_is_public(attachment: BlogAttachmentRow, session: Session, admin: Optional[UserRow]) -> bool:
+def _attachment_is_public(
+    attachment: BlogAttachmentRow,
+    session: Session,
+    admin: Optional[UserRow],
+    access: Optional[V3Access] = None,
+) -> bool:
     if attachment.post_id is None:
-        return attachment.is_sample or admin is not None
+        return attachment.is_sample or admin is not None or bool(access and access.is_member)
     post = session.get(BlogPostRow, attachment.post_id)
     if post is None:
         return admin is not None
@@ -299,11 +307,12 @@ def download_blog_attachment(
     session: Session = Depends(db_session_dep),
     download: bool = Query(default=False),
     admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
+    access: V3Access = Depends(get_v3_access),
 ) -> FileResponse:
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
-    if not _attachment_is_public(row, session, admin):
+    if not _attachment_is_public(row, session, admin, access):
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
 
     try:
@@ -324,12 +333,12 @@ def download_blog_attachment(
 def list_blog_documents(
     session: Session = Depends(db_session_dep),
     category: Optional[str] = Query(default=None),
+    access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
-    """Public sample documents (standalone PDFs marked is_sample)."""
-    filters = [
-        BlogAttachmentRow.post_id.is_(None),
-        BlogAttachmentRow.is_sample.is_(True),
-    ]
+    """Standalone PDF documents: public samples for guests, full archive for members."""
+    filters = [BlogAttachmentRow.post_id.is_(None)]
+    if not access.is_member:
+        filters.append(BlogAttachmentRow.is_sample.is_(True))
     if category:
         filters.append(BlogAttachmentRow.category == category.strip())
 
@@ -345,10 +354,7 @@ def list_blog_documents(
     categories = (
         session.execute(
             select(BlogAttachmentRow.category)
-            .where(
-                BlogAttachmentRow.post_id.is_(None),
-                BlogAttachmentRow.is_sample.is_(True),
-            )
+            .where(*(filters[:1] if access.is_member else filters[:2]))
             .distinct()
             .order_by(BlogAttachmentRow.category)
         )
@@ -358,6 +364,7 @@ def list_blog_documents(
     return BlogDocumentListResponse(
         items=[_to_attachment_public(r) for r in rows],
         categories=[c for c in categories if c],
+        access=membership_public_fields(access),
     )
 
 
