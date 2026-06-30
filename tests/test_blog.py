@@ -391,3 +391,85 @@ def test_member_only_pdf_download_requires_member_access(db_session: Session, tm
     download = member.get("/api/blog/attachments/locked-doc-1/file")
     assert download.status_code == 200
     assert download.content.startswith(b"%PDF")
+
+
+def test_member_documents_pagination(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    now = dt.datetime.now(dt.timezone.utc)
+    store_pdf = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf
+
+    for index in range(25):
+        stored_name, _ = store_pdf(
+            content=f"%PDF-1.4\n% doc {index}\n".encode(),
+            original_filename=f"report_202601{index + 1:02d}.pdf",
+        )
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"page-doc-{index}",
+                stored_name=stored_name,
+                original_filename=f"report_202601{index + 1:02d}.pdf",
+                mime_type="application/pdf",
+                file_size=32,
+                title_zh=f"报告 {index}",
+                category="market-report",
+                is_sample=False,
+                created_at=now - dt.timedelta(days=index),
+            )
+        )
+    db_session.commit()
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    page1 = member.get("/api/blog/documents?page=1&page_size=20")
+    assert page1.status_code == 200
+    payload1 = page1.json()
+    assert payload1["total"] == 25
+    assert payload1["page"] == 1
+    assert payload1["page_size"] == 20
+    assert len(payload1["items"]) == 20
+    assert payload1["items"][0]["id"] == "page-doc-24"
+
+    page2 = member.get("/api/blog/documents?page=2&page_size=20")
+    payload2 = page2.json()
+    assert len(payload2["items"]) == 5
+    assert payload2["items"][0]["id"] == "page-doc-4"
+
+
+def test_guest_teaser_uses_filename_date_for_newest(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    now = dt.datetime.now(dt.timezone.utc)
+    store_pdf = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf
+
+    docs = [
+        ("course-old-date", "course_20260101.pdf", now),
+        ("course-new-date", "course_20260601.pdf", now - dt.timedelta(days=365)),
+        ("course-no-date", "course-notes.pdf", now),
+    ]
+    for doc_id, filename, created_at in docs:
+        stored_name, _ = store_pdf(content=b"%PDF-1.4\n", original_filename=filename)
+        db_session.add(
+            BlogAttachmentRow(
+                id=doc_id,
+                stored_name=stored_name,
+                original_filename=filename,
+                mime_type="application/pdf",
+                file_size=32,
+                title_zh=doc_id,
+                category="course",
+                is_sample=False,
+                created_at=created_at,
+            )
+        )
+    db_session.commit()
+
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    res = guest.get("/api/blog/documents?category=course")
+    assert res.status_code == 200
+    visible_ids = [item["id"] for item in res.json()["items"]]
+    assert visible_ids == ["course-new-date"]
+

@@ -19,6 +19,7 @@ from app.api.deps_membership import get_v3_access
 from app.db.models_blog import BlogAttachmentRow, BlogPostRow
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
+from app.services.blog_document_sort import sort_documents
 from app.services.blog_storage import BlogStorageError, delete_pdf, resolve_pdf_path, store_pdf
 from app.services.membership import V3Access, membership_public_fields
 
@@ -47,6 +48,9 @@ class BlogAttachmentPublic(BaseModel):
 
 class BlogDocumentListResponse(BaseModel):
     items: list[BlogAttachmentPublic]
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
     categories: list[str] = Field(default_factory=list)
     access: dict[str, object] = Field(default_factory=dict)
 
@@ -156,14 +160,44 @@ def _attachment_urls(attachment: BlogAttachmentRow) -> tuple[str, str]:
 
 
 _GUEST_TEASER_FRACTION = 0.3
+_DEFAULT_DOCUMENT_PAGE_SIZE = 20
 
 
-def _document_order_by():
-    """Newest first; tie-break batch imports that share created_at."""
-    return (
-        BlogAttachmentRow.created_at.desc().nullslast(),
-        BlogAttachmentRow.id.desc(),
+def _fetch_standalone_documents(
+    session: Session,
+    *,
+    category: Optional[str] = None,
+) -> list[BlogAttachmentRow]:
+    filters = [BlogAttachmentRow.post_id.is_(None)]
+    if category:
+        filters.append(BlogAttachmentRow.category == category.strip())
+    rows = session.execute(select(BlogAttachmentRow).where(*filters)).scalars().all()
+    return sort_documents(list(rows))
+
+
+def _paginate_documents(
+    rows: list[BlogAttachmentRow],
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[list[BlogAttachmentRow], int]:
+    total = len(rows)
+    offset = (page - 1) * page_size
+    return rows[offset : offset + page_size], total
+
+
+def _standalone_categories(session: Session) -> list[str]:
+    categories = (
+        session.execute(
+            select(BlogAttachmentRow.category)
+            .where(BlogAttachmentRow.post_id.is_(None))
+            .distinct()
+            .order_by(BlogAttachmentRow.category)
+        )
+        .scalars()
+        .all()
     )
+    return [c for c in categories if c]
 
 
 def _to_attachment_public(
@@ -193,19 +227,7 @@ def _to_attachment_public(
 
 def _guest_teaser_ids(session: Session, *, category: Optional[str] = None) -> set[str]:
     """Newest ceil(30%) of standalone docs per category visible to guests."""
-    filters = [BlogAttachmentRow.post_id.is_(None)]
-    if category:
-        filters.append(BlogAttachmentRow.category == category.strip())
-
-    rows = (
-        session.execute(
-            select(BlogAttachmentRow)
-            .where(*filters)
-            .order_by(*_document_order_by())
-        )
-        .scalars()
-        .all()
-    )
+    rows = _fetch_standalone_documents(session, category=category)
     by_category: dict[str, list[BlogAttachmentRow]] = defaultdict(list)
     for row in rows:
         by_category[row.category or "general"].append(row)
@@ -381,56 +403,30 @@ def download_blog_attachment(
 def list_blog_documents(
     session: Session = Depends(db_session_dep),
     category: Optional[str] = Query(default=None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_DEFAULT_DOCUMENT_PAGE_SIZE, ge=1, le=100),
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
     """Standalone PDF documents: ~30% teaser per category for guests, full archive for members."""
-    standalone = [BlogAttachmentRow.post_id.is_(None)]
     if access.is_member:
-        filters = list(standalone)
-        if category:
-            filters.append(BlogAttachmentRow.category == category.strip())
-        rows = (
-            session.execute(
-                select(BlogAttachmentRow)
-                .where(*filters)
-                .order_by(*_document_order_by())
-            )
-            .scalars()
-            .all()
-        )
-        items = [_to_attachment_public(r) for r in rows]
+        rows = _fetch_standalone_documents(session, category=category)
+        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
+        items = [_to_attachment_public(r) for r in page_rows]
     else:
         teaser_ids = _guest_teaser_ids(session, category=category)
         if not teaser_ids:
             rows = []
         else:
-            filters = [*standalone, BlogAttachmentRow.id.in_(teaser_ids)]
-            if category:
-                filters.append(BlogAttachmentRow.category == category.strip())
-            rows = (
-                session.execute(
-                    select(BlogAttachmentRow)
-                    .where(*filters)
-                    .order_by(*_document_order_by())
-                )
-                .scalars()
-                .all()
-            )
-        items = [_to_attachment_public(r, is_preview=True) for r in rows]
+            rows = [row for row in _fetch_standalone_documents(session, category=category) if row.id in teaser_ids]
+        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
+        items = [_to_attachment_public(r, is_preview=True) for r in page_rows]
 
-    categories = (
-        session.execute(
-            select(BlogAttachmentRow.category)
-            .where(*standalone)
-            .distinct()
-            .order_by(BlogAttachmentRow.category)
-        )
-        .scalars()
-        .all()
-    )
     return BlogDocumentListResponse(
         items=items,
-        categories=[c for c in categories if c],
+        total=total,
+        page=page,
+        page_size=page_size,
+        categories=_standalone_categories(session),
         access=membership_public_fields(access),
     )
 
@@ -441,10 +437,10 @@ def list_blog_attachments_admin(
     session: Session = Depends(db_session_dep),
     standalone_only: bool = Query(default=False),
 ) -> BlogDocumentListResponse:
-    stmt = select(BlogAttachmentRow).order_by(*_document_order_by())
+    stmt = select(BlogAttachmentRow)
     if standalone_only:
         stmt = stmt.where(BlogAttachmentRow.post_id.is_(None))
-    rows = session.execute(stmt).scalars().all()
+    rows = sort_documents(list(session.execute(stmt).scalars().all()))
     categories = (
         session.execute(select(BlogAttachmentRow.category).distinct().order_by(BlogAttachmentRow.category))
         .scalars()
