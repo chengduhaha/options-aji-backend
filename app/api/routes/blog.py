@@ -158,6 +158,14 @@ def _attachment_urls(attachment: BlogAttachmentRow) -> tuple[str, str]:
 _GUEST_TEASER_FRACTION = 0.3
 
 
+def _document_order_by():
+    """Newest first; tie-break batch imports that share created_at."""
+    return (
+        BlogAttachmentRow.created_at.desc().nullslast(),
+        BlogAttachmentRow.id.desc(),
+    )
+
+
 def _to_attachment_public(
     attachment: BlogAttachmentRow,
     *,
@@ -193,7 +201,7 @@ def _guest_teaser_ids(session: Session, *, category: Optional[str] = None) -> se
         session.execute(
             select(BlogAttachmentRow)
             .where(*filters)
-            .order_by(BlogAttachmentRow.created_at.desc())
+            .order_by(*_document_order_by())
         )
         .scalars()
         .all()
@@ -385,7 +393,7 @@ def list_blog_documents(
             session.execute(
                 select(BlogAttachmentRow)
                 .where(*filters)
-                .order_by(BlogAttachmentRow.created_at.desc())
+                .order_by(*_document_order_by())
             )
             .scalars()
             .all()
@@ -403,7 +411,7 @@ def list_blog_documents(
                 session.execute(
                     select(BlogAttachmentRow)
                     .where(*filters)
-                    .order_by(BlogAttachmentRow.created_at.desc())
+                    .order_by(*_document_order_by())
                 )
                 .scalars()
                 .all()
@@ -433,7 +441,7 @@ def list_blog_attachments_admin(
     session: Session = Depends(db_session_dep),
     standalone_only: bool = Query(default=False),
 ) -> BlogDocumentListResponse:
-    stmt = select(BlogAttachmentRow).order_by(BlogAttachmentRow.created_at.desc())
+    stmt = select(BlogAttachmentRow).order_by(*_document_order_by())
     if standalone_only:
         stmt = stmt.where(BlogAttachmentRow.post_id.is_(None))
     rows = session.execute(stmt).scalars().all()
