@@ -178,14 +178,14 @@ def test_upload_and_download_pdf(db_session: Session, tmp_path, monkeypatch) -> 
         data={
             "post_id": "post-1",
             "title_zh": "示例报告",
-            "category": "daily-report",
+            "category": "market-report",
             "description_zh": "每日深度分析",
             "is_sample": "true",
         },
     )
     assert res.status_code == 200
     attachment_id = res.json()["attachment"]["id"]
-    assert res.json()["attachment"]["category"] == "daily-report"
+    assert res.json()["attachment"]["category"] == "market-report"
 
     row = db_session.get(BlogAttachmentRow, attachment_id)
     assert row is not None
