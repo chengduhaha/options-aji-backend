@@ -240,6 +240,49 @@ def _guest_teaser_ids(session: Session, *, category: Optional[str] = None) -> se
     return visible
 
 
+def _document_category_breakdown(session: Session) -> list[dict[str, object]]:
+    rows = _fetch_standalone_documents(session)
+    by_category: dict[str, list[BlogAttachmentRow]] = defaultdict(list)
+    for row in rows:
+        by_category[row.category or "general"].append(row)
+
+    teaser_ids = _guest_teaser_ids(session)
+    breakdown: list[dict[str, object]] = []
+    for cat in sorted(by_category.keys()):
+        cat_rows = by_category[cat]
+        member_count = len(cat_rows)
+        guest_visible = sum(1 for row in cat_rows if row.id in teaser_ids)
+        breakdown.append(
+            {
+                "category": cat,
+                "member_count": member_count,
+                "guest_visible_count": guest_visible,
+            }
+        )
+    return breakdown
+
+
+def _document_access_fields(
+    session: Session,
+    access: V3Access,
+    *,
+    category: Optional[str] = None,
+) -> dict[str, object]:
+    fields = membership_public_fields(access)
+    member_total = len(_fetch_standalone_documents(session, category=category))
+    guest_teaser_count = len(_guest_teaser_ids(session, category=category))
+    visible_count = member_total if access.is_member else guest_teaser_count
+    fields.update(
+        {
+            "visible_count": visible_count,
+            "member_total_count": member_total,
+            "guest_teaser_count": guest_teaser_count,
+            "category_breakdown": _document_category_breakdown(session) if category is None else [],
+        }
+    )
+    return fields
+
+
 def _attachment_is_public(
     attachment: BlogAttachmentRow,
     session: Session,
@@ -427,7 +470,7 @@ def list_blog_documents(
         page=page,
         page_size=page_size,
         categories=_standalone_categories(session),
-        access=membership_public_fields(access),
+        access=_document_access_fields(session, access, category=category),
     )
 
 

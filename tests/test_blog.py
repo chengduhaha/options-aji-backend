@@ -265,6 +265,8 @@ def test_member_documents_include_non_sample_standalone_pdfs(db_session: Session
     assert member_res.status_code == 200
     payload = member_res.json()
     assert payload["access"]["is_member"] is True
+    assert payload["access"]["visible_count"] == payload["access"]["member_total_count"]
+    assert payload["access"]["guest_teaser_count"] >= 1
     assert any(item["id"] == "member-doc-1" for item in payload["items"])
     assert "market-report" in payload["categories"]
 
@@ -326,6 +328,18 @@ def test_guest_teaser_thirty_percent_per_category(db_session: Session, tmp_path,
     assert all(item["is_preview"] for item in payload["items"])
     assert "course" in payload["categories"]
     assert "unusual-flow" in payload["categories"]
+
+    access = payload["access"]
+    assert access["visible_count"] == 5
+    assert access["member_total_count"] == 14
+    assert access["guest_teaser_count"] == 5
+    assert access["is_member"] is False
+    assert len(access["category_breakdown"]) == 2
+    breakdown = {row["category"]: row for row in access["category_breakdown"]}
+    assert breakdown["course"]["member_count"] == 10
+    assert breakdown["course"]["guest_visible_count"] == 3
+    assert breakdown["unusual-flow"]["member_count"] == 4
+    assert breakdown["unusual-flow"]["guest_visible_count"] == 2
 
     newest_course_ids = {f"course-doc-{index}" for index in range(3)}
     assert newest_course_ids.issubset(visible_ids)
@@ -472,4 +486,9 @@ def test_guest_teaser_uses_filename_date_for_newest(db_session: Session, tmp_pat
     assert res.status_code == 200
     visible_ids = [item["id"] for item in res.json()["items"]]
     assert visible_ids == ["course-new-date"]
+    access = res.json()["access"]
+    assert access["member_total_count"] == 3
+    assert access["guest_teaser_count"] == 1
+    assert access["visible_count"] == 1
+    assert access["category_breakdown"] == []
 
