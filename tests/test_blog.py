@@ -761,7 +761,10 @@ def test_upload_and_serve_video_thumbnail(db_session: Session, tmp_path, monkeyp
     thumb = member.get("/api/blog/attachments/video-thumb-1/thumbnail")
     assert thumb.status_code == 200
     assert thumb.headers.get("content-type", "").startswith("image/")
-    assert thumb.content.startswith(b"\xff\xd8")
+    assert "max-age=86400" in thumb.headers.get("cache-control", "")
+    assert thumb.headers.get("etag")
+    # New uploads are converted to WebP; legacy JPEG magic bytes are no longer guaranteed.
+    assert len(thumb.content) > 0
 
 
 def test_guest_can_fetch_member_only_video_thumbnail(db_session: Session, tmp_path, monkeypatch) -> None:
@@ -799,6 +802,36 @@ def test_guest_can_fetch_member_only_video_thumbnail(db_session: Session, tmp_pa
     thumb = guest.get("/api/blog/attachments/video-thumb-member/thumbnail")
     assert thumb.status_code == 200
     assert thumb.headers.get("content-type", "").startswith("image/")
+    assert "stale-while-revalidate=604800" in thumb.headers.get("cache-control", "")
+
+
+def test_thumbnail_url_uses_cdn_when_configured(db_session: Session, monkeypatch) -> None:
+    monkeypatch.setenv("CDN_BASE_URL", "https://media.options-aji.com")
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-cdn-thumb",
+            stored_name="courses/thumb.mp4",
+            original_filename="cdn.mp4",
+            mime_type="video/mp4",
+            file_size=1024,
+            title_zh="CDN 封面",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/thumb.mp4",
+            thumbnail_stored_name="courses/thumbnails/video-cdn-thumb.webp",
+        )
+    )
+    db_session.commit()
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    res = member.get("/api/blog/courses")
+    assert res.status_code == 200
+    item = next(i for i in res.json()["items"] if i["id"] == "video-cdn-thumb")
+    assert item["thumbnail_url"] == "https://media.options-aji.com/courses/thumbnails/video-cdn-thumb.webp"
 
 
 def test_video_file_endpoint_rejects_download(db_session: Session) -> None:

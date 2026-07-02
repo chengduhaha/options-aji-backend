@@ -28,13 +28,17 @@ from app.services.blog_thumbnail import (
     delete_thumbnail,
     is_r2_thumbnail_key,
     resolve_thumbnail_path,
+    resolve_thumbnail_public_url,
     store_thumbnail,
+    thumbnail_cache_control,
+    thumbnail_etag,
     thumbnail_mime_type,
 )
 from app.services.membership import V3Access, membership_public_fields
 from app.services.r2_storage import (
     R2StorageError,
     fetch_object_range,
+    head_object_meta,
     head_object_size,
     presigned_get_url,
     r2_configured,
@@ -201,7 +205,10 @@ def _attachment_urls(attachment: BlogAttachmentRow) -> tuple[str, str]:
 def _thumbnail_url(attachment: BlogAttachmentRow) -> Optional[str]:
     if not attachment.thumbnail_stored_name:
         return None
-    return f"/api/blog/attachments/{attachment.id}/thumbnail"
+    return resolve_thumbnail_public_url(
+        attachment_id=attachment.id,
+        stored_name=attachment.thumbnail_stored_name,
+    )
 
 
 _GUEST_TEASER_FRACTION = 0.3
@@ -789,6 +796,7 @@ def stream_blog_video(
 @router.get("/api/blog/attachments/{attachment_id}/thumbnail", response_model=None)
 def get_blog_attachment_thumbnail(
     attachment_id: str,
+    request: Request,
     session: Session = Depends(db_session_dep),
     admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
     access: V3Access = Depends(get_v3_access),
@@ -801,16 +809,21 @@ def get_blog_attachment_thumbnail(
 
     stored = row.thumbnail_stored_name
     mime = thumbnail_mime_type(stored)
-    cache_headers = {"Cache-Control": "public, max-age=3600"}
+    cache_headers = {"Cache-Control": thumbnail_cache_control()}
 
     if is_r2_thumbnail_key(stored):
         if not r2_configured():
             raise HTTPException(status_code=404, detail={"code": "file_missing", "message": "封面不存在。"})
         try:
-            total_size = head_object_size(stored)
-            fetched = fetch_object_range(stored, byte_start=0, byte_end=max(0, total_size - 1))
+            meta = head_object_meta(stored)
+            fetched = fetch_object_range(stored, byte_start=0, byte_end=max(0, meta.size - 1))
         except R2StorageError as exc:
             raise HTTPException(status_code=404, detail={"code": "file_missing", "message": str(exc)}) from exc
+
+        etag_value = meta.etag or thumbnail_etag(stored_name=stored, size=meta.size)
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip('"') == etag_value:
+            return StreamingResponse(iter(()), status_code=304, headers={**cache_headers, "ETag": f'"{etag_value}"'})
 
         def _iter_thumb() -> object:
             try:
@@ -825,7 +838,8 @@ def get_blog_attachment_thumbnail(
         headers = {
             **cache_headers,
             "Content-Type": fetched.content_type or mime,
-            "Content-Disposition": _content_disposition("inline", f"cover-{attachment_id}.jpg"),
+            "Content-Disposition": _content_disposition("inline", f"cover-{attachment_id}.webp"),
+            "ETag": f'"{etag_value}"',
         }
         return StreamingResponse(_iter_thumb(), headers=headers)
 
@@ -834,12 +848,22 @@ def get_blog_attachment_thumbnail(
     except BlogStorageError as exc:
         raise HTTPException(status_code=404, detail={"code": "file_missing", "message": str(exc)}) from exc
 
+    stat = path.stat()
+    etag_value = thumbnail_etag(stored_name=stored, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match.strip('"') == etag_value:
+        return StreamingResponse(iter(()), status_code=304, headers={**cache_headers, "ETag": f'"{etag_value}"'})
+
     return FileResponse(
         path,
         media_type=mime,
         headers={
             **cache_headers,
             "Content-Disposition": _content_disposition("inline", path.name),
+            "ETag": f'"{etag_value}"',
+            "Last-Modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime(
+                "%a, %d %b %Y %H:%M:%S GMT"
+            ),
         },
     )
 

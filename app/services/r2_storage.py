@@ -199,13 +199,31 @@ class R2RangeFetch:
     is_partial: bool
 
 
+@dataclass(frozen=True)
+class R2ObjectHead:
+    size: int
+    etag: str | None = None
+    content_type: str | None = None
+
+
 def head_object_size(key: str, *, settings: Settings | None = None) -> int:
+    return head_object_meta(key, settings=settings).size
+
+
+def head_object_meta(key: str, *, settings: Settings | None = None) -> R2ObjectHead:
     client = get_r2_client(settings)
     try:
         payload = client.head_object(Bucket=bucket_name(settings), Key=key)
     except ClientError as exc:
         raise R2StorageError(f"R2 head_object failed for key={key!r}.") from exc
-    return int(payload.get("ContentLength") or 0)
+    raw_etag = payload.get("ETag")
+    etag = str(raw_etag).strip('"') if raw_etag else None
+    content_type = payload.get("ContentType")
+    return R2ObjectHead(
+        size=int(payload.get("ContentLength") or 0),
+        etag=etag,
+        content_type=str(content_type) if content_type else None,
+    )
 
 
 def fetch_object_range(

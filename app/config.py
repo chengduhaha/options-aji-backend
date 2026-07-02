@@ -203,6 +203,15 @@ class Settings(BaseSettings):
     r2_bucket_name: str = ""
     r2_endpoint_url: str = ""
     r2_presigned_url_ttl_seconds: int = 3600
+    #: Public CDN origin for R2 objects (e.g. https://media.options-aji.com).
+    #: When set, course thumbnail URLs in list responses point here instead of the API proxy.
+    #: Requires DNS + R2 custom domain; zero behavior change when unset.
+    cdn_base_url: str = ""
+    #: Alias for cdn_base_url (R2_PUBLIC_URL in some deployments).
+    r2_public_url: str = ""
+    #: Absolute API origin for resolving thumbnail_url in JSON (e.g. https://api.options-aji.com).
+    #: When unset, thumbnail_url remains a relative /api/... path (frontend resolves via NEXT_PUBLIC_API_BASE).
+    api_public_base_url: str = ""
 
     # ── Baidu Netdisk (member library import) ─────────────────────────────────
     baidu_netdisk_access_token: str = ""
