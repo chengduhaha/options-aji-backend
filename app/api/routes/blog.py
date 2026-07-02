@@ -370,6 +370,11 @@ def _document_access_fields(
     return fields
 
 
+def _course_thumbnail_is_public(attachment: BlogAttachmentRow) -> bool:
+    """Standalone course cover images are marketing assets, not gated like video playback."""
+    return attachment.post_id is None and attachment.media_kind == "video"
+
+
 def _attachment_is_public(
     attachment: BlogAttachmentRow,
     session: Session,
@@ -791,7 +796,7 @@ def get_blog_attachment_thumbnail(
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None or not row.thumbnail_stored_name:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "封面不存在。"})
-    if not _attachment_is_public(row, session, admin, access):
+    if not _course_thumbnail_is_public(row) and not _attachment_is_public(row, session, admin, access):
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "封面不存在。"})
 
     stored = row.thumbnail_stored_name

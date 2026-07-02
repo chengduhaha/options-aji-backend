@@ -764,6 +764,43 @@ def test_upload_and_serve_video_thumbnail(db_session: Session, tmp_path, monkeyp
     assert thumb.content.startswith(b"\xff\xd8")
 
 
+def test_guest_can_fetch_member_only_video_thumbnail(db_session: Session, tmp_path, monkeypatch) -> None:
+    """Course cover images are public even when the video itself is member-only."""
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-thumb-member",
+            stored_name="courses/member.mp4",
+            original_filename="member.mp4",
+            mime_type="video/mp4",
+            file_size=2048,
+            title_zh="会员专属封面",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/member.mp4",
+        )
+    )
+    db_session.commit()
+
+    admin = _admin_client(db_session)
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+
+    tiny_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82"
+    upload = admin.post(
+        "/api/blog/attachments/video-thumb-member/thumbnail",
+        files={"file": ("cover.png", tiny_png, "image/png")},
+    )
+    assert upload.status_code == 200
+
+    thumb = guest.get("/api/blog/attachments/video-thumb-member/thumbnail")
+    assert thumb.status_code == 200
+    assert thumb.headers.get("content-type", "").startswith("image/")
+
+
 def test_video_file_endpoint_rejects_download(db_session: Session) -> None:
     db_session.add(
         BlogAttachmentRow(
