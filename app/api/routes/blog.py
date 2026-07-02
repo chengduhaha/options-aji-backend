@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import math
 import re
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Annotated, Optional
+from typing import Annotated, BinaryIO, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -37,16 +38,20 @@ from app.services.blog_thumbnail import (
 from app.services.membership import V3Access, membership_public_fields
 from app.services.r2_storage import (
     R2StorageError,
+    delete_object,
     fetch_object_range,
     head_object_meta,
     head_object_size,
     presigned_get_url,
     r2_configured,
+    upload_stream,
 )
 
 router = APIRouter(tags=["blog"])
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_MAX_COURSE_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
+_COURSE_VIDEO_MIME = "video/mp4"
 
 
 class BlogAttachmentPublic(BaseModel):
@@ -154,6 +159,29 @@ class BlogPostUpdateBody(BaseModel):
 class BlogUploadPdfResponse(BaseModel):
     attachment: BlogAttachmentPublic
     post_id: Optional[str] = None
+
+
+class BlogUploadCourseResponse(BaseModel):
+    attachment: BlogAttachmentPublic
+
+
+class _SizeLimitedReader:
+    """Reject binary reads once cumulative size exceeds max_bytes."""
+
+    def __init__(self, wrapped: BinaryIO, max_bytes: int) -> None:
+        self._wrapped = wrapped
+        self._max_bytes = max_bytes
+        self.total_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._wrapped.read(size)
+        self.total_read += len(chunk)
+        if self.total_read > self._max_bytes:
+            raise ValueError(f"视频超过 {self._max_bytes // (1024 ** 3)}GB 上限。")
+        return chunk
+
+    def readable(self) -> bool:
+        return True
 
 
 class BlogAttachmentUpdateBody(BaseModel):
@@ -902,6 +930,98 @@ async def upload_blog_attachment_thumbnail(
     session.commit()
     session.refresh(row)
     return _to_attachment_public(row)
+
+
+def _validate_course_video_upload(*, filename: str, content_type: str | None) -> None:
+    name = filename.strip()
+    if not name.lower().endswith(".mp4"):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_video", "message": "仅支持 MP4 视频文件。"},
+        )
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    if ctype and ctype not in {"video/mp4", "application/octet-stream"}:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_video", "message": "仅支持 MP4 视频文件。"},
+        )
+
+
+@router.post(
+    "/api/blog/admin/courses",
+    response_model=BlogUploadCourseResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_blog_course(
+    file: UploadFile = File(...),
+    title_zh: str = Form(...),
+    category: Optional[str] = Form(default=None),
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> BlogUploadCourseResponse:
+    title = title_zh.strip()
+    if not title:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "title_required", "message": "请填写课程标题。"},
+        )
+
+    _validate_course_video_upload(filename=file.filename or "", content_type=file.content_type)
+
+    if not r2_configured():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "r2_not_configured", "message": "视频存储未配置，无法上传。"},
+        )
+
+    attachment_id = str(uuid.uuid4())
+    r2_key = f"courses/{attachment_id}.mp4"
+    original_filename = (file.filename or "course.mp4").strip()
+    limited = _SizeLimitedReader(file.file, _MAX_COURSE_VIDEO_BYTES)
+    try:
+        upload_stream(
+            key=r2_key,
+            body=limited,
+            content_type=_COURSE_VIDEO_MIME,
+            content_length=None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "file_too_large", "message": str(exc)},
+        ) from exc
+    except R2StorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "upload_failed", "message": str(exc)},
+        ) from exc
+
+    attachment = BlogAttachmentRow(
+        id=attachment_id,
+        post_id=None,
+        stored_name=r2_key,
+        original_filename=original_filename,
+        mime_type=_COURSE_VIDEO_MIME,
+        file_size=limited.total_read,
+        title_zh=title,
+        category=(category or "course").strip() or "course",
+        is_sample=False,
+        media_kind="video",
+        r2_key=r2_key,
+    )
+    try:
+        session.add(attachment)
+        session.commit()
+        session.refresh(attachment)
+    except Exception:
+        session.rollback()
+        try:
+            delete_object(r2_key)
+        except R2StorageError:
+            pass
+        raise
+
+    return BlogUploadCourseResponse(attachment=_to_attachment_public(attachment))
 
 
 @router.get("/api/blog/attachments", response_model=BlogDocumentListResponse)

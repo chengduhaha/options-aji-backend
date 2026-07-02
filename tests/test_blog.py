@@ -834,6 +834,72 @@ def test_thumbnail_url_uses_cdn_when_configured(db_session: Session, monkeypatch
     assert item["thumbnail_url"] == "https://media.options-aji.com/courses/thumbnails/video-cdn-thumb.webp"
 
 
+def test_upload_blog_course(db_session: Session, monkeypatch) -> None:
+    client = _admin_client(db_session)
+    uploaded: dict[str, object] = {}
+
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+
+    def _fake_upload_stream(*, key: str, body, content_type: str, content_length=None, settings=None) -> None:
+        uploaded["key"] = key
+        uploaded["content_type"] = content_type
+        data = body.read()
+        uploaded["size"] = len(data)
+        uploaded["bytes"] = data
+
+    monkeypatch.setattr("app.api.routes.blog.upload_stream", _fake_upload_stream)
+
+    mp4_bytes = b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 64
+    res = client.post(
+        "/api/blog/admin/courses",
+        files={"file": ("lesson-new.mp4", mp4_bytes, "video/mp4")},
+        data={"title_zh": "新课程测试", "category": "course"},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    attachment = body["attachment"]
+    assert attachment["title_zh"] == "新课程测试"
+    assert attachment["media_kind"] == "video"
+    assert attachment["category"] == "course"
+    assert attachment["thumbnail_url"] is None
+    assert str(uploaded["key"]).startswith("courses/")
+    assert str(uploaded["key"]).endswith(".mp4")
+    assert uploaded["content_type"] == "video/mp4"
+    assert uploaded["size"] == len(mp4_bytes)
+
+    row = db_session.get(BlogAttachmentRow, attachment["id"])
+    assert row is not None
+    assert row.post_id is None
+    assert row.r2_key == uploaded["key"]
+    assert row.is_sample is False
+
+
+def test_upload_blog_course_rejects_non_mp4(db_session: Session, monkeypatch) -> None:
+    client = _admin_client(db_session)
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+
+    res = client.post(
+        "/api/blog/admin/courses",
+        files={"file": ("notes.pdf", b"%PDF-1.4", "application/pdf")},
+        data={"title_zh": "错误格式"},
+    )
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "invalid_video"
+
+
+def test_upload_blog_course_requires_title(db_session: Session, monkeypatch) -> None:
+    client = _admin_client(db_session)
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+
+    res = client.post(
+        "/api/blog/admin/courses",
+        files={"file": ("lesson.mp4", b"\x00\x00\x00\x20ftypmp42", "video/mp4")},
+        data={"title_zh": "   "},
+    )
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "title_required"
+
+
 def test_video_file_endpoint_rejects_download(db_session: Session) -> None:
     db_session.add(
         BlogAttachmentRow(
