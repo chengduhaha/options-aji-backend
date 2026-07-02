@@ -8,20 +8,29 @@ from datetime import datetime, timezone
 from typing import Annotated, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.api.deps_auth import get_current_admin_user, get_optional_admin_user
 from app.api.deps_membership import get_v3_access
 from app.db.models_blog import BlogAttachmentRow, BlogPostRow
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
 from app.services.blog_document_sort import sort_documents
+from app.services.blog_play_token import create_play_token, decode_play_token
 from app.services.blog_storage import BlogStorageError, delete_pdf, resolve_pdf_path, store_pdf
 from app.services.membership import V3Access, membership_public_fields
+from app.services.r2_storage import (
+    R2StorageError,
+    fetch_object_range,
+    head_object_size,
+    presigned_get_url,
+    r2_configured,
+)
 
 router = APIRouter(tags=["blog"])
 
@@ -40,10 +49,19 @@ class BlogAttachmentPublic(BaseModel):
     description_en: Optional[str] = None
     is_sample: bool = True
     is_preview: bool = False
+    media_kind: str = "document"
     post_id: Optional[str] = None
     download_url: str
     view_url: str
     created_at: Optional[datetime] = None
+
+
+class BlogPlayTokenResponse(BaseModel):
+    token: str
+    stream_url: str
+    expires_at: datetime
+    preview: bool
+    preview_seconds: Optional[int] = None
 
 
 class BlogDocumentListResponse(BaseModel):
@@ -155,6 +173,9 @@ def _normalize_slug(slug: str) -> str:
 
 
 def _attachment_urls(attachment: BlogAttachmentRow) -> tuple[str, str]:
+    if attachment.media_kind == "video":
+        base = f"/api/blog/attachments/{attachment.id}/stream"
+        return base, base
     base = f"/api/blog/attachments/{attachment.id}/file"
     return base, base
 
@@ -167,8 +188,12 @@ def _fetch_standalone_documents(
     session: Session,
     *,
     category: Optional[str] = None,
+    media_kind: str = "document",
 ) -> list[BlogAttachmentRow]:
-    filters = [BlogAttachmentRow.post_id.is_(None)]
+    filters = [
+        BlogAttachmentRow.post_id.is_(None),
+        BlogAttachmentRow.media_kind == media_kind,
+    ]
     if category:
         filters.append(BlogAttachmentRow.category == category.strip())
     rows = session.execute(select(BlogAttachmentRow).where(*filters)).scalars().all()
@@ -186,11 +211,14 @@ def _paginate_documents(
     return rows[offset : offset + page_size], total
 
 
-def _standalone_categories(session: Session) -> list[str]:
+def _standalone_categories(session: Session, *, media_kind: str = "document") -> list[str]:
     categories = (
         session.execute(
             select(BlogAttachmentRow.category)
-            .where(BlogAttachmentRow.post_id.is_(None))
+            .where(
+                BlogAttachmentRow.post_id.is_(None),
+                BlogAttachmentRow.media_kind == media_kind,
+            )
             .distinct()
             .order_by(BlogAttachmentRow.category)
         )
@@ -218,6 +246,7 @@ def _to_attachment_public(
         description_en=attachment.description_en,
         is_sample=attachment.is_sample,
         is_preview=is_preview,
+        media_kind=attachment.media_kind or "document",
         post_id=attachment.post_id,
         download_url=download_url,
         view_url=view_url,
@@ -225,9 +254,14 @@ def _to_attachment_public(
     )
 
 
-def _guest_teaser_ids(session: Session, *, category: Optional[str] = None) -> set[str]:
-    """Newest ceil(30%) of standalone docs per category visible to guests."""
-    rows = _fetch_standalone_documents(session, category=category)
+def _guest_teaser_ids(
+    session: Session,
+    *,
+    category: Optional[str] = None,
+    media_kind: str = "document",
+) -> set[str]:
+    """Newest ceil(30%) of standalone items per category visible to guests."""
+    rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind)
     by_category: dict[str, list[BlogAttachmentRow]] = defaultdict(list)
     for row in rows:
         by_category[row.category or "general"].append(row)
@@ -240,13 +274,17 @@ def _guest_teaser_ids(session: Session, *, category: Optional[str] = None) -> se
     return visible
 
 
-def _document_category_breakdown(session: Session) -> list[dict[str, object]]:
-    rows = _fetch_standalone_documents(session)
+def _document_category_breakdown(
+    session: Session,
+    *,
+    media_kind: str = "document",
+) -> list[dict[str, object]]:
+    rows = _fetch_standalone_documents(session, media_kind=media_kind)
     by_category: dict[str, list[BlogAttachmentRow]] = defaultdict(list)
     for row in rows:
         by_category[row.category or "general"].append(row)
 
-    teaser_ids = _guest_teaser_ids(session)
+    teaser_ids = _guest_teaser_ids(session, media_kind=media_kind)
     breakdown: list[dict[str, object]] = []
     for cat in sorted(by_category.keys()):
         cat_rows = by_category[cat]
@@ -267,17 +305,20 @@ def _document_access_fields(
     access: V3Access,
     *,
     category: Optional[str] = None,
+    media_kind: str = "document",
 ) -> dict[str, object]:
     fields = membership_public_fields(access)
-    member_total = len(_fetch_standalone_documents(session, category=category))
-    guest_teaser_count = len(_guest_teaser_ids(session, category=category))
+    member_total = len(_fetch_standalone_documents(session, category=category, media_kind=media_kind))
+    guest_teaser_count = len(_guest_teaser_ids(session, category=category, media_kind=media_kind))
     visible_count = member_total if access.is_member else guest_teaser_count
     fields.update(
         {
             "visible_count": visible_count,
             "member_total_count": member_total,
             "guest_teaser_count": guest_teaser_count,
-            "category_breakdown": _document_category_breakdown(session) if category is None else [],
+            "category_breakdown": (
+                _document_category_breakdown(session, media_kind=media_kind) if category is None else []
+            ),
         }
     )
     return fields
@@ -292,11 +333,76 @@ def _attachment_is_public(
     if attachment.post_id is None:
         if admin is not None or bool(access and access.is_member):
             return True
-        return attachment.id in _guest_teaser_ids(session)
+        media_kind = attachment.media_kind or "document"
+        return attachment.id in _guest_teaser_ids(session, media_kind=media_kind)
     post = session.get(BlogPostRow, attachment.post_id)
     if post is None:
         return admin is not None
     return post.status == "published" or admin is not None
+
+
+def _video_r2_key(attachment: BlogAttachmentRow) -> str:
+    key = (attachment.r2_key or attachment.stored_name or "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "file_missing", "message": "视频文件不存在。"},
+        )
+    return key
+
+
+def _parse_range_header(range_header: str, total_size: int) -> tuple[int, int]:
+    match = re.match(r"bytes=(\d+)-(\d*)", range_header.strip())
+    if not match or total_size <= 0:
+        raise HTTPException(
+            status_code=416,
+            detail={"code": "invalid_range", "message": "无效的 Range 请求。"},
+        )
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else total_size - 1
+    end = min(end, total_size - 1)
+    if start > end:
+        raise HTTPException(
+            status_code=416,
+            detail={"code": "invalid_range", "message": "无效的 Range 请求。"},
+        )
+    return start, end
+
+
+def _list_standalone_media(
+    session: Session,
+    access: V3Access,
+    *,
+    category: Optional[str],
+    page: int,
+    page_size: int,
+    media_kind: str,
+) -> BlogDocumentListResponse:
+    if access.is_member:
+        rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind)
+        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
+        items = [_to_attachment_public(r) for r in page_rows]
+    else:
+        teaser_ids = _guest_teaser_ids(session, category=category, media_kind=media_kind)
+        if not teaser_ids:
+            rows = []
+        else:
+            rows = [
+                row
+                for row in _fetch_standalone_documents(session, category=category, media_kind=media_kind)
+                if row.id in teaser_ids
+            ]
+        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
+        items = [_to_attachment_public(r, is_preview=True) for r in page_rows]
+
+    return BlogDocumentListResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        categories=_standalone_categories(session, media_kind=media_kind),
+        access=_document_access_fields(session, access, category=category, media_kind=media_kind),
+    )
 
 
 def _to_summary(row: BlogPostRow, attachment_count: int = 0) -> BlogPostSummary:
@@ -425,6 +531,11 @@ def download_blog_attachment(
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
+    if row.media_kind == "video":
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "请使用视频播放接口。"},
+        )
     if not _attachment_is_public(row, session, admin, access):
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
 
@@ -451,27 +562,135 @@ def list_blog_documents(
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
     """Standalone PDF documents: ~30% teaser per category for guests, full archive for members."""
-    if access.is_member:
-        rows = _fetch_standalone_documents(session, category=category)
-        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
-        items = [_to_attachment_public(r) for r in page_rows]
-    else:
-        teaser_ids = _guest_teaser_ids(session, category=category)
-        if not teaser_ids:
-            rows = []
-        else:
-            rows = [row for row in _fetch_standalone_documents(session, category=category) if row.id in teaser_ids]
-        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
-        items = [_to_attachment_public(r, is_preview=True) for r in page_rows]
-
-    return BlogDocumentListResponse(
-        items=items,
-        total=total,
+    return _list_standalone_media(
+        session,
+        access,
+        category=category,
         page=page,
         page_size=page_size,
-        categories=_standalone_categories(session),
-        access=_document_access_fields(session, access, category=category),
+        media_kind="document",
     )
+
+
+@router.get("/api/blog/courses", response_model=BlogDocumentListResponse)
+def list_blog_courses(
+    session: Session = Depends(db_session_dep),
+    category: Optional[str] = Query(default=None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_DEFAULT_DOCUMENT_PAGE_SIZE, ge=1, le=100),
+    access: V3Access = Depends(get_v3_access),
+) -> BlogDocumentListResponse:
+    """Standalone course videos: ~30% teaser per category for guests, full library for members."""
+    return _list_standalone_media(
+        session,
+        access,
+        category=category,
+        page=page,
+        page_size=page_size,
+        media_kind="video",
+    )
+
+
+@router.post("/api/blog/attachments/{attachment_id}/play-token", response_model=BlogPlayTokenResponse)
+def create_blog_play_token(
+    attachment_id: str,
+    session: Session = Depends(db_session_dep),
+    admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
+    access: V3Access = Depends(get_v3_access),
+) -> BlogPlayTokenResponse:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None or row.media_kind != "video":
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+    if not row.r2_key and not row.stored_name:
+        raise HTTPException(status_code=404, detail={"code": "file_missing", "message": "视频文件不存在。"})
+    if not r2_configured():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "storage_unavailable", "message": "视频存储未配置。"},
+        )
+
+    is_member = admin is not None or access.is_member
+    preview = not is_member
+    if preview and not _attachment_is_public(row, session, admin, access):
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+
+    token, expires_at = create_play_token(attachment_id=row.id, preview=preview)
+    stream_url = f"/api/blog/attachments/{row.id}/stream?ticket={quote(token, safe='')}"
+    preview_seconds = None
+    if preview:
+        preview_seconds = max(1, int(get_settings().blog_video_guest_preview_seconds))
+
+    return BlogPlayTokenResponse(
+        token=token,
+        stream_url=stream_url,
+        expires_at=expires_at,
+        preview=preview,
+        preview_seconds=preview_seconds,
+    )
+
+
+@router.get("/api/blog/attachments/{attachment_id}/stream", response_model=None)
+def stream_blog_video(
+    attachment_id: str,
+    request: Request,
+    ticket: str = Query(..., min_length=10),
+    session: Session = Depends(db_session_dep),
+) -> StreamingResponse | RedirectResponse:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None or row.media_kind != "video":
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+
+    payload = decode_play_token(ticket)
+    if payload is None or payload.get("attachment_id") != attachment_id:
+        raise HTTPException(status_code=403, detail={"code": "invalid_ticket", "message": "播放凭证无效或已过期。"})
+
+    key = _video_r2_key(row)
+    cfg = get_settings()
+    if cfg.blog_video_stream_redirect:
+        try:
+            url = presigned_get_url(key, expires_in=min(600, max(60, int(cfg.blog_play_token_ttl_seconds))))
+        except R2StorageError as exc:
+            raise HTTPException(status_code=503, detail={"code": "stream_failed", "message": str(exc)}) from exc
+        return RedirectResponse(url=url, status_code=302)
+
+    try:
+        total_size = head_object_size(key)
+    except R2StorageError as exc:
+        raise HTTPException(status_code=404, detail={"code": "file_missing", "message": str(exc)}) from exc
+
+    range_header = request.headers.get("range")
+    if range_header:
+        start, end = _parse_range_header(range_header, total_size)
+    else:
+        start, end = 0, total_size - 1
+
+    try:
+        fetched = fetch_object_range(key, byte_start=start, byte_end=end)
+    except R2StorageError as exc:
+        raise HTTPException(status_code=503, detail={"code": "stream_failed", "message": str(exc)}) from exc
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": fetched.content_type or row.mime_type,
+        "Content-Disposition": _content_disposition("inline", row.original_filename),
+    }
+    status_code = status.HTTP_206_PARTIAL_CONTENT if range_header else status.HTTP_200_OK
+    if range_header:
+        headers["Content-Range"] = f"bytes {fetched.range_start}-{fetched.range_end}/{fetched.total_size}"
+        headers["Content-Length"] = str(fetched.content_length)
+
+    def _iter_body() -> object:
+        try:
+            chunk_size = 1024 * 256
+            while True:
+                chunk = fetched.body.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            fetched.body.close()
+
+    return StreamingResponse(_iter_body(), status_code=status_code, headers=headers)
 
 
 @router.get("/api/blog/attachments", response_model=BlogDocumentListResponse)

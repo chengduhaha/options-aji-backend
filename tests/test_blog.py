@@ -451,6 +451,130 @@ def test_member_documents_pagination(db_session: Session, tmp_path, monkeypatch)
     assert payload2["items"][0]["id"] == "page-doc-4"
 
 
+def test_list_blog_courses_guest_teaser(db_session: Session) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    for index in range(4):
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"video-{index}",
+                stored_name=f"courses/lesson_{index}.mp4",
+                original_filename=f"lesson_{index}.mp4",
+                mime_type="video/mp4",
+                file_size=1024 * 1024 * (100 + index),
+                title_zh=f"课程 {index}",
+                category="course",
+                is_sample=False,
+                media_kind="video",
+                r2_key=f"courses/lesson_{index}.mp4",
+                created_at=now - dt.timedelta(days=index),
+            )
+        )
+    db_session.commit()
+
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    res = guest.get("/api/blog/courses")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["total"] == 2
+    assert payload["items"][0]["media_kind"] == "video"
+    assert payload["items"][0]["is_preview"] is True
+    assert payload["access"]["member_total_count"] == 4
+    assert payload["access"]["guest_teaser_count"] == 2
+
+
+def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch) -> None:
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-pytest")
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-member-1",
+            stored_name="courses/full.mp4",
+            original_filename="full.mp4",
+            mime_type="video/mp4",
+            file_size=2048,
+            title_zh="完整课程",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/full.mp4",
+        )
+    )
+    db_session.commit()
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+    token_res = member.post("/api/blog/attachments/video-member-1/play-token")
+    assert token_res.status_code == 200
+    body = token_res.json()
+    assert body["preview"] is False
+    assert "ticket=" in body["stream_url"]
+
+    from io import BytesIO
+
+    from app.services.r2_storage import R2RangeFetch
+
+    fake_body = BytesIO(b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 100)
+
+    def _fake_fetch(*_args, **_kwargs) -> R2RangeFetch:
+        return R2RangeFetch(
+            body=fake_body,
+            content_type="video/mp4",
+            content_length=108,
+            total_size=108,
+            range_start=0,
+            range_end=107,
+            is_partial=False,
+        )
+
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+    monkeypatch.setattr("app.api.routes.blog.head_object_size", lambda _key: 108)
+    monkeypatch.setattr("app.api.routes.blog.fetch_object_range", _fake_fetch)
+
+    stream_res = member.get(body["stream_url"])
+    assert stream_res.status_code == 200
+    assert stream_res.headers.get("content-type", "").startswith("video/")
+    assert b"ftyp" in stream_res.content
+
+
+def test_guest_cannot_play_token_locked_video(db_session: Session, monkeypatch) -> None:
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-pytest")
+    now = dt.datetime.now(dt.timezone.utc)
+    for index in range(4):
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"locked-video-{index}",
+                stored_name=f"courses/locked_{index}.mp4",
+                original_filename=f"locked_{index}.mp4",
+                mime_type="video/mp4",
+                file_size=1024,
+                title_zh=f"锁定 {index}",
+                category="course",
+                is_sample=False,
+                media_kind="video",
+                r2_key=f"courses/locked_{index}.mp4",
+                created_at=now - dt.timedelta(days=index),
+            )
+        )
+    db_session.commit()
+
+    guest = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+    locked = guest.post("/api/blog/attachments/locked-video-3/play-token")
+    assert locked.status_code == 404
+    preview = guest.post("/api/blog/attachments/locked-video-0/play-token")
+    assert preview.status_code == 200
+    assert preview.json()["preview"] is True
+    assert preview.json()["preview_seconds"] == 180
+
+
 def test_guest_teaser_uses_filename_date_for_newest(db_session: Session, tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
     now = dt.datetime.now(dt.timezone.utc)

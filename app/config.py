@@ -191,6 +191,22 @@ class Settings(BaseSettings):
     openbb_api_key: str = ""
     #: Local directory for blog PDF uploads (persisted on backend host).
     blog_upload_dir: str = "./data/blog/pdfs"
+    blog_play_token_ttl_seconds: int = 600
+    blog_video_guest_preview_seconds: int = 180
+    #: When true, stream endpoint redirects to a short-lived R2 presigned URL.
+    blog_video_stream_redirect: bool = False
+
+    # ── Cloudflare R2 (course videos / large media) ───────────────────────────
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = ""
+    r2_endpoint_url: str = ""
+    r2_presigned_url_ttl_seconds: int = 3600
+
+    # ── Baidu Netdisk (member library import) ─────────────────────────────────
+    baidu_netdisk_access_token: str = ""
+
     twitter_api_io_key: str = ""
     xpoz_api_key: str = ""
     xpoz_base_url: str = "https://api.xpoz.ai/v1"
