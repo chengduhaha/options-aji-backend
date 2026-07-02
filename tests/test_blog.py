@@ -485,6 +485,51 @@ def test_list_blog_courses_guest_teaser(db_session: Session) -> None:
     assert payload["access"]["guest_teaser_count"] == 2
 
 
+def test_blog_courses_sort_and_single_get(db_session: Session) -> None:
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    for index in range(3):
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"sort-video-{index}",
+                stored_name=f"courses/sort_{index}.mp4",
+                original_filename=f"sort_{index}.mp4",
+                mime_type="video/mp4",
+                file_size=1024,
+                title_zh=f"排序课程 {index}",
+                category="course",
+                is_sample=False,
+                media_kind="video",
+                r2_key=f"courses/sort_{index}.mp4",
+                created_at=now - dt.timedelta(days=index),
+            )
+        )
+    db_session.commit()
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    newest = member.get("/api/blog/courses?sort=newest&page_size=10")
+    assert newest.status_code == 200
+    newest_ids = [item["id"] for item in newest.json()["items"]]
+    assert newest_ids.index("sort-video-0") < newest_ids.index("sort-video-2")
+
+    oldest = member.get("/api/blog/courses?sort=oldest&page_size=10")
+    assert oldest.status_code == 200
+    oldest_ids = [item["id"] for item in oldest.json()["items"]]
+    assert oldest_ids.index("sort-video-2") < oldest_ids.index("sort-video-0")
+
+    single = member.get("/api/blog/courses/sort-video-1")
+    assert single.status_code == 200
+    body = single.json()
+    assert body["id"] == "sort-video-1"
+    assert body["media_kind"] == "video"
+    assert "duration_sec" in body
+    assert "thumbnail_url" in body
+
+
 def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch) -> None:
     monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-pytest")
     db_session.add(

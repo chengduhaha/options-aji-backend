@@ -54,6 +54,10 @@ class BlogAttachmentPublic(BaseModel):
     download_url: str
     view_url: str
     created_at: Optional[datetime] = None
+    #: Video duration in seconds when known (optional until metadata is imported).
+    duration_sec: Optional[int] = None
+    #: Cover image URL when uploaded (optional).
+    thumbnail_url: Optional[str] = None
 
 
 class BlogPlayTokenResponse(BaseModel):
@@ -184,11 +188,29 @@ _GUEST_TEASER_FRACTION = 0.3
 _DEFAULT_DOCUMENT_PAGE_SIZE = 20
 
 
+def _sort_course_rows(rows: list[BlogAttachmentRow], *, sort: str) -> list[BlogAttachmentRow]:
+    """Sort standalone course videos by created_at (newest or oldest first)."""
+    reverse = sort != "oldest"
+
+    def _key(row: BlogAttachmentRow) -> tuple[datetime, str]:
+        created = row.created_at
+        if created is None:
+            created = datetime.min.replace(tzinfo=timezone.utc)
+        elif created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        else:
+            created = created.astimezone(timezone.utc)
+        return created, row.id
+
+    return sorted(rows, key=_key, reverse=reverse)
+
+
 def _fetch_standalone_documents(
     session: Session,
     *,
     category: Optional[str] = None,
     media_kind: str = "document",
+    sort: str = "newest",
 ) -> list[BlogAttachmentRow]:
     filters = [
         BlogAttachmentRow.post_id.is_(None),
@@ -197,6 +219,8 @@ def _fetch_standalone_documents(
     if category:
         filters.append(BlogAttachmentRow.category == category.strip())
     rows = session.execute(select(BlogAttachmentRow).where(*filters)).scalars().all()
+    if media_kind == "video":
+        return _sort_course_rows(list(rows), sort=sort)
     return sort_documents(list(rows))
 
 
@@ -377,9 +401,10 @@ def _list_standalone_media(
     page: int,
     page_size: int,
     media_kind: str,
+    sort: str = "newest",
 ) -> BlogDocumentListResponse:
     if access.is_member:
-        rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind)
+        rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind, sort=sort)
         page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
         items = [_to_attachment_public(r) for r in page_rows]
     else:
@@ -389,7 +414,7 @@ def _list_standalone_media(
         else:
             rows = [
                 row
-                for row in _fetch_standalone_documents(session, category=category, media_kind=media_kind)
+                for row in _fetch_standalone_documents(session, category=category, media_kind=media_kind, sort=sort)
                 if row.id in teaser_ids
             ]
         page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
@@ -403,6 +428,20 @@ def _list_standalone_media(
         categories=_standalone_categories(session, media_kind=media_kind),
         access=_document_access_fields(session, access, category=category, media_kind=media_kind),
     )
+
+
+def _get_standalone_course(
+    session: Session,
+    access: V3Access,
+    attachment_id: str,
+) -> BlogAttachmentPublic:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None or row.post_id is not None or row.media_kind != "video":
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+    if not _attachment_is_public(row, session, None, access):
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+    is_preview = not access.is_member
+    return _to_attachment_public(row, is_preview=is_preview)
 
 
 def _to_summary(row: BlogPostRow, attachment_count: int = 0) -> BlogPostSummary:
@@ -578,6 +617,7 @@ def list_blog_courses(
     category: Optional[str] = Query(default=None),
     page: int = Query(1, ge=1),
     page_size: int = Query(_DEFAULT_DOCUMENT_PAGE_SIZE, ge=1, le=100),
+    sort: str = Query(default="newest", pattern="^(newest|oldest)$"),
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
     """Standalone course videos: ~30% teaser per category for guests, full library for members."""
@@ -588,7 +628,18 @@ def list_blog_courses(
         page=page,
         page_size=page_size,
         media_kind="video",
+        sort=sort,
     )
+
+
+@router.get("/api/blog/courses/{attachment_id}", response_model=BlogAttachmentPublic)
+def get_blog_course(
+    attachment_id: str,
+    session: Session = Depends(db_session_dep),
+    access: V3Access = Depends(get_v3_access),
+) -> BlogAttachmentPublic:
+    """Single standalone course video metadata for the watch page."""
+    return _get_standalone_course(session, access, attachment_id)
 
 
 @router.post("/api/blog/attachments/{attachment_id}/play-token", response_model=BlogPlayTokenResponse)
