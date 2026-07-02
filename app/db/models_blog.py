@@ -31,6 +31,8 @@ class BlogPostRow(Base):
     excerpt_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     body_zh: Mapped[str] = mapped_column(Text, nullable=False, default="")
     body_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: ``markdown`` (default) or ``html`` — HTML is stored in body_zh/body_en.
+    content_format: Mapped[str] = mapped_column(String(16), nullable=False, default="markdown")
     category: Mapped[str] = mapped_column(String(64), nullable=False, default="general")
     tags: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")

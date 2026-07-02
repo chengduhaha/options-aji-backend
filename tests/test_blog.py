@@ -155,6 +155,7 @@ def test_admin_create_update_delete_post(db_session: Session) -> None:
     )
     assert create.status_code == 201
     post_id = create.json()["id"]
+    assert create.json()["content_format"] == "markdown"
 
     update = client.put(
         f"/api/blog/posts/{post_id}",
@@ -165,6 +166,65 @@ def test_admin_create_update_delete_post(db_session: Session) -> None:
 
     delete = client.delete(f"/api/blog/posts/{post_id}")
     assert delete.status_code == 204
+
+
+def test_create_html_format_post(db_session: Session) -> None:
+    client = _admin_client(db_session)
+    html_body = '<div class="chart-card"><canvas id="c"></canvas></div>'
+    create = client.post(
+        "/api/blog/posts",
+        json={
+            "slug": "html-chart-post",
+            "title_zh": "HTML 图表文",
+            "body_zh": html_body,
+            "content_format": "html",
+            "category": "insights",
+            "status": "published",
+        },
+    )
+    assert create.status_code == 201
+    assert create.json()["content_format"] == "html"
+    assert create.json()["body_zh"] == html_body
+
+    detail = client.get("/api/blog/posts/html-chart-post")
+    assert detail.status_code == 200
+    assert detail.json()["content_format"] == "html"
+
+    invalid = client.post(
+        "/api/blog/posts",
+        json={
+            "slug": "bad-format",
+            "title_zh": "无效格式",
+            "body_zh": "x",
+            "content_format": "pdf",
+            "status": "draft",
+        },
+    )
+    assert invalid.status_code == 422
+
+
+def test_update_content_format(db_session: Session) -> None:
+    client = _admin_client(db_session)
+    create = client.post(
+        "/api/blog/posts",
+        json={
+            "slug": "format-switch",
+            "title_zh": "格式切换",
+            "body_zh": "# md",
+            "content_format": "markdown",
+            "status": "draft",
+        },
+    )
+    assert create.status_code == 201
+    post_id = create.json()["id"]
+
+    update = client.put(
+        f"/api/blog/posts/{post_id}",
+        json={"content_format": "html", "body_zh": "<p>html</p>"},
+    )
+    assert update.status_code == 200
+    assert update.json()["content_format"] == "html"
+    assert update.json()["body_zh"] == "<p>html</p>"
 
 
 def test_upload_and_download_pdf(db_session: Session, tmp_path, monkeypatch) -> None:

@@ -91,6 +91,7 @@ class BlogPostSummary(BaseModel):
     title_en: Optional[str] = None
     excerpt_zh: Optional[str] = None
     excerpt_en: Optional[str] = None
+    content_format: str = "markdown"
     category: str
     tags: list[str] = Field(default_factory=list)
     status: str
@@ -113,6 +114,9 @@ class BlogPostListResponse(BaseModel):
     categories: list[str] = Field(default_factory=list)
 
 
+_CONTENT_FORMAT_RE = re.compile(r"^(markdown|html)$")
+
+
 class BlogPostCreateBody(BaseModel):
     slug: str = Field(min_length=1, max_length=160)
     title_zh: str = Field(min_length=1, max_length=512)
@@ -121,6 +125,7 @@ class BlogPostCreateBody(BaseModel):
     excerpt_en: Optional[str] = None
     body_zh: str = ""
     body_en: Optional[str] = None
+    content_format: str = Field(default="markdown", pattern="^(markdown|html)$")
     category: str = Field(default="general", max_length=64)
     tags: list[str] = Field(default_factory=list)
     status: str = Field(default="draft", pattern="^(draft|published)$")
@@ -135,6 +140,7 @@ class BlogPostUpdateBody(BaseModel):
     excerpt_en: Optional[str] = None
     body_zh: Optional[str] = None
     body_en: Optional[str] = None
+    content_format: Optional[str] = Field(default=None, pattern="^(markdown|html)$")
     category: Optional[str] = Field(default=None, max_length=64)
     tags: Optional[list[str]] = None
     status: Optional[str] = Field(default=None, pattern="^(draft|published)$")
@@ -460,6 +466,16 @@ def _get_standalone_course(
     return _to_attachment_public(row, is_preview=is_preview)
 
 
+def _normalize_content_format(raw: str | None) -> str:
+    value = (raw or "markdown").strip().lower()
+    if not _CONTENT_FORMAT_RE.match(value):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_content_format", "message": "content_format 仅允许 markdown 或 html。"},
+        )
+    return value
+
+
 def _to_summary(row: BlogPostRow, attachment_count: int = 0) -> BlogPostSummary:
     return BlogPostSummary(
         id=row.id,
@@ -468,6 +484,7 @@ def _to_summary(row: BlogPostRow, attachment_count: int = 0) -> BlogPostSummary:
         title_en=row.title_en,
         excerpt_zh=row.excerpt_zh,
         excerpt_en=row.excerpt_en,
+        content_format=row.content_format or "markdown",
         category=row.category,
         tags=_parse_tags(row.tags),
         status=row.status,
@@ -956,6 +973,7 @@ def create_blog_post(
         excerpt_en=body.excerpt_en,
         body_zh=body.body_zh,
         body_en=body.body_en,
+        content_format=_normalize_content_format(body.content_format),
         category=body.category.strip() or "general",
         tags=_serialize_tags(body.tags),
         status=body.status,
@@ -1000,6 +1018,8 @@ def update_blog_post(
         row.body_zh = body.body_zh
     if body.body_en is not None:
         row.body_en = body.body_en or None
+    if body.content_format is not None:
+        row.content_format = _normalize_content_format(body.content_format)
     if body.category is not None:
         row.category = body.category.strip() or "general"
     if body.tags is not None:
