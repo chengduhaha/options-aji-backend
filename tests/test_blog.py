@@ -900,6 +900,121 @@ def test_upload_blog_course_requires_title(db_session: Session, monkeypatch) -> 
     assert res.json()["error"]["code"] == "title_required"
 
 
+def test_upload_blog_course_with_cover(db_session: Session, monkeypatch) -> None:
+    client = _admin_client(db_session)
+    uploaded: dict[str, object] = {}
+    thumb_stored: dict[str, str] = {}
+
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+
+    def _fake_upload_stream(*, key: str, body, content_type: str, content_length=None, settings=None) -> None:
+        uploaded["key"] = key
+        uploaded["bytes"] = body.read()
+
+    def _fake_store_thumbnail(*, content: bytes, attachment_id: str, mime_type: str) -> str:
+        stored = f"courses/thumbnails/{attachment_id}.webp"
+        thumb_stored["name"] = stored
+        thumb_stored["size"] = str(len(content))
+        return stored
+
+    monkeypatch.setattr("app.api.routes.blog.upload_stream", _fake_upload_stream)
+    monkeypatch.setattr("app.api.routes.blog.store_thumbnail", _fake_store_thumbnail)
+
+    mp4_bytes = b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 64
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    res = client.post(
+        "/api/blog/admin/courses",
+        files={
+            "file": ("lesson-new.mp4", mp4_bytes, "video/mp4"),
+            "cover": ("cover.png", png_bytes, "image/png"),
+        },
+        data={"title_zh": "带封面课程", "category": "course"},
+    )
+    assert res.status_code == 201
+    attachment = res.json()["attachment"]
+    assert attachment["title_zh"] == "带封面课程"
+    assert attachment["thumbnail_url"] is not None
+
+    row = db_session.get(BlogAttachmentRow, attachment["id"])
+    assert row is not None
+    assert row.thumbnail_stored_name == thumb_stored["name"]
+
+
+def test_delete_video_course_cleans_r2(db_session: Session, monkeypatch) -> None:
+    client = _admin_client(db_session)
+    deleted_keys: list[str] = []
+
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+
+    def _fake_delete_object(key: str, *, settings=None) -> None:
+        deleted_keys.append(key)
+
+    monkeypatch.setattr("app.api.routes.blog.delete_object", _fake_delete_object)
+    monkeypatch.setattr("app.api.routes.blog.delete_thumbnail", lambda stored_name: deleted_keys.append(stored_name))
+
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-delete-1",
+            stored_name="courses/video-delete-1.mp4",
+            original_filename="lesson.mp4",
+            mime_type="video/mp4",
+            file_size=1024,
+            title_zh="待删除课程",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/video-delete-1.mp4",
+            thumbnail_stored_name="courses/thumbnails/video-delete-1.webp",
+        )
+    )
+    db_session.commit()
+
+    res = client.delete("/api/blog/attachments/video-delete-1")
+    assert res.status_code == 204
+    assert "courses/video-delete-1.mp4" in deleted_keys
+    assert "courses/thumbnails/video-delete-1.webp" in deleted_keys
+    assert db_session.get(BlogAttachmentRow, "video-delete-1") is None
+
+
+def test_blog_posts_pagination(db_session: Session) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    for i in range(15):
+        db_session.add(
+            BlogPostRow(
+                id=f"post-page-{i}",
+                slug=f"page-post-{i}",
+                title_zh=f"分页文章 {i}",
+                excerpt_zh="摘要",
+                body_zh="# 正文",
+                category="insights",
+                status="published",
+                published_at=now - dt.timedelta(hours=i),
+                updated_at=now,
+            )
+        )
+    db_session.commit()
+
+    client = _client_with_access(
+        db_session,
+        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+    )
+    page1 = client.get("/api/blog/posts?page=1&page_size=12")
+    assert page1.status_code == 200
+    body1 = page1.json()
+    assert body1["total"] == 16
+    assert len(body1["items"]) == 12
+    assert body1["page"] == 1
+    assert body1["page_size"] == 12
+
+    page2 = client.get("/api/blog/posts?page=2&page_size=12")
+    assert page2.status_code == 200
+    body2 = page2.json()
+    assert len(body2["items"]) == 4
+    page1_ids = {item["id"] for item in body1["items"]}
+    page2_ids = {item["id"] for item in body2["items"]}
+    assert page1_ids.isdisjoint(page2_ids)
+
+
 def test_video_file_endpoint_rejects_download(db_session: Session) -> None:
     db_session.add(
         BlogAttachmentRow(

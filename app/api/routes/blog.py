@@ -956,6 +956,7 @@ async def upload_blog_course(
     file: UploadFile = File(...),
     title_zh: str = Form(...),
     category: Optional[str] = Form(default=None),
+    cover: Optional[UploadFile] = File(default=None),
     admin: UserRow = Depends(get_current_admin_user),
     session: Session = Depends(db_session_dep),
 ) -> BlogUploadCourseResponse:
@@ -1020,6 +1021,33 @@ async def upload_blog_course(
         except R2StorageError:
             pass
         raise
+
+    cover_filename = (cover.filename or "").strip() if cover is not None else ""
+    if cover_filename:
+        cover_content = await cover.read()
+        cover_mime = cover.content_type or "image/jpeg"
+        try:
+            thumbnail_stored = store_thumbnail(
+                content=cover_content,
+                attachment_id=attachment.id,
+                mime_type=cover_mime,
+            )
+        except BlogThumbnailError as exc:
+            try:
+                delete_object(r2_key)
+            except R2StorageError:
+                pass
+            session.delete(attachment)
+            session.commit()
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_thumbnail", "message": str(exc)},
+            ) from exc
+
+        attachment.thumbnail_stored_name = thumbnail_stored
+        session.add(attachment)
+        session.commit()
+        session.refresh(attachment)
 
     return BlogUploadCourseResponse(attachment=_to_attachment_public(attachment))
 
@@ -1092,7 +1120,14 @@ def delete_blog_attachment(
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
     if row.thumbnail_stored_name:
         delete_thumbnail(row.thumbnail_stored_name)
-    if row.media_kind != "video":
+    if row.media_kind == "video":
+        video_key = (row.r2_key or row.stored_name or "").strip()
+        if video_key:
+            try:
+                delete_object(video_key)
+            except R2StorageError:
+                pass
+    else:
         delete_pdf(row.stored_name)
     session.delete(row)
     session.commit()
