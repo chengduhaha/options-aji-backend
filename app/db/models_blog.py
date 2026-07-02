@@ -59,6 +59,7 @@ class BlogAttachmentRow(Base):
         Index("idx_blog_attachments_post_id", "post_id"),
         Index("idx_blog_attachments_stored_name", "stored_name", unique=True),
         Index("idx_blog_attachments_category", "category"),
+        Index("idx_blog_attachments_baidu_fs_id", "baidu_fs_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -82,6 +83,16 @@ class BlogAttachmentRow(Base):
     description_zh: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     description_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_sample: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: ``document`` (local PDF) or ``video`` (R2 object).
+    media_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="document")
+    #: R2 object key when media_kind is video.
+    r2_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    #: Baidu Netdisk fs_id for import deduplication.
+    baidu_fs_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    #: Local filename or R2 key for course cover image.
+    thumbnail_stored_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    #: Video duration in seconds when known.
+    duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -23,6 +23,14 @@ from app.db.session import db_session_dep
 from app.services.blog_document_sort import sort_documents
 from app.services.blog_play_token import create_play_token, decode_play_token
 from app.services.blog_storage import BlogStorageError, delete_pdf, resolve_pdf_path, store_pdf
+from app.services.blog_thumbnail import (
+    BlogThumbnailError,
+    delete_thumbnail,
+    is_r2_thumbnail_key,
+    resolve_thumbnail_path,
+    store_thumbnail,
+    thumbnail_mime_type,
+)
 from app.services.membership import V3Access, membership_public_fields
 from app.services.r2_storage import (
     R2StorageError,
@@ -178,10 +186,16 @@ def _normalize_slug(slug: str) -> str:
 
 def _attachment_urls(attachment: BlogAttachmentRow) -> tuple[str, str]:
     if attachment.media_kind == "video":
-        base = f"/api/blog/attachments/{attachment.id}/stream"
-        return base, base
+        view = f"/api/blog/attachments/{attachment.id}/stream"
+        return view, view
     base = f"/api/blog/attachments/{attachment.id}/file"
-    return base, base
+    return f"{base}?download=true", base
+
+
+def _thumbnail_url(attachment: BlogAttachmentRow) -> Optional[str]:
+    if not attachment.thumbnail_stored_name:
+        return None
+    return f"/api/blog/attachments/{attachment.id}/thumbnail"
 
 
 _GUEST_TEASER_FRACTION = 0.3
@@ -275,6 +289,8 @@ def _to_attachment_public(
         download_url=download_url,
         view_url=view_url,
         created_at=attachment.created_at,
+        duration_sec=attachment.duration_sec,
+        thumbnail_url=_thumbnail_url(attachment),
     )
 
 
@@ -699,7 +715,11 @@ def stream_blog_video(
     cfg = get_settings()
     if cfg.blog_video_stream_redirect:
         try:
-            url = presigned_get_url(key, expires_in=min(600, max(60, int(cfg.blog_play_token_ttl_seconds))))
+            url = presigned_get_url(
+                key,
+                expires_in=min(600, max(60, int(cfg.blog_play_token_ttl_seconds))),
+                response_content_disposition=_content_disposition("inline", row.original_filename),
+            )
         except R2StorageError as exc:
             raise HTTPException(status_code=503, detail={"code": "stream_failed", "message": str(exc)}) from exc
         return RedirectResponse(url=url, status_code=302)
@@ -742,6 +762,100 @@ def stream_blog_video(
             fetched.body.close()
 
     return StreamingResponse(_iter_body(), status_code=status_code, headers=headers)
+
+
+@router.get("/api/blog/attachments/{attachment_id}/thumbnail", response_model=None)
+def get_blog_attachment_thumbnail(
+    attachment_id: str,
+    session: Session = Depends(db_session_dep),
+    admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
+    access: V3Access = Depends(get_v3_access),
+) -> FileResponse | StreamingResponse:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None or not row.thumbnail_stored_name:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "封面不存在。"})
+    if not _attachment_is_public(row, session, admin, access):
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "封面不存在。"})
+
+    stored = row.thumbnail_stored_name
+    mime = thumbnail_mime_type(stored)
+    cache_headers = {"Cache-Control": "public, max-age=3600"}
+
+    if is_r2_thumbnail_key(stored):
+        if not r2_configured():
+            raise HTTPException(status_code=404, detail={"code": "file_missing", "message": "封面不存在。"})
+        try:
+            total_size = head_object_size(stored)
+            fetched = fetch_object_range(stored, byte_start=0, byte_end=max(0, total_size - 1))
+        except R2StorageError as exc:
+            raise HTTPException(status_code=404, detail={"code": "file_missing", "message": str(exc)}) from exc
+
+        def _iter_thumb() -> object:
+            try:
+                while True:
+                    chunk = fetched.body.read(1024 * 64)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                fetched.body.close()
+
+        headers = {
+            **cache_headers,
+            "Content-Type": fetched.content_type or mime,
+            "Content-Disposition": _content_disposition("inline", f"cover-{attachment_id}.jpg"),
+        }
+        return StreamingResponse(_iter_thumb(), headers=headers)
+
+    try:
+        path = resolve_thumbnail_path(stored)
+    except BlogStorageError as exc:
+        raise HTTPException(status_code=404, detail={"code": "file_missing", "message": str(exc)}) from exc
+
+    return FileResponse(
+        path,
+        media_type=mime,
+        headers={
+            **cache_headers,
+            "Content-Disposition": _content_disposition("inline", path.name),
+        },
+    )
+
+
+@router.post("/api/blog/attachments/{attachment_id}/thumbnail", response_model=BlogAttachmentPublic)
+async def upload_blog_attachment_thumbnail(
+    attachment_id: str,
+    file: UploadFile = File(...),
+    admin: UserRow = Depends(get_current_admin_user),
+    session: Session = Depends(db_session_dep),
+) -> BlogAttachmentPublic:
+    row = session.get(BlogAttachmentRow, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
+    if row.media_kind != "video":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_media", "message": "仅视频课程支持上传封面。"},
+        )
+
+    content = await file.read()
+    mime_type = file.content_type or "image/jpeg"
+    try:
+        stored_name = store_thumbnail(content=content, attachment_id=row.id, mime_type=mime_type)
+    except BlogThumbnailError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_thumbnail", "message": str(exc)},
+        ) from exc
+
+    if row.thumbnail_stored_name and row.thumbnail_stored_name != stored_name:
+        delete_thumbnail(row.thumbnail_stored_name)
+
+    row.thumbnail_stored_name = stored_name
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return _to_attachment_public(row)
 
 
 @router.get("/api/blog/attachments", response_model=BlogDocumentListResponse)
@@ -810,7 +924,10 @@ def delete_blog_attachment(
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
-    delete_pdf(row.stored_name)
+    if row.thumbnail_stored_name:
+        delete_thumbnail(row.thumbnail_stored_name)
+    if row.media_kind != "video":
+        delete_pdf(row.stored_name)
     session.delete(row)
     session.commit()
 

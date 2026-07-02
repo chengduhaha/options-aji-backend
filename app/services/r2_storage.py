@@ -145,15 +145,19 @@ def presigned_get_url(
     key: str,
     *,
     expires_in: int | None = None,
+    response_content_disposition: str | None = None,
     settings: Settings | None = None,
 ) -> str:
     cfg = _require_settings(settings)
     ttl = expires_in if expires_in is not None else cfg.r2_presigned_url_ttl_seconds
     client = get_r2_client(cfg)
+    params: dict[str, str] = {"Bucket": bucket_name(cfg), "Key": key}
+    if response_content_disposition:
+        params["ResponseContentDisposition"] = response_content_disposition
     try:
         return client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": bucket_name(cfg), "Key": key},
+            Params=params,
             ExpiresIn=ttl,
         )
     except ClientError as exc:

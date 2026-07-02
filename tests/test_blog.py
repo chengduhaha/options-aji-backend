@@ -661,3 +661,70 @@ def test_guest_teaser_uses_filename_date_for_newest(db_session: Session, tmp_pat
     assert access["visible_count"] == 1
     assert access["category_breakdown"] == []
 
+
+def test_upload_and_serve_video_thumbnail(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-thumb-1",
+            stored_name="courses/thumb.mp4",
+            original_filename="thumb.mp4",
+            mime_type="video/mp4",
+            file_size=2048,
+            title_zh="封面测试",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/thumb.mp4",
+        )
+    )
+    db_session.commit()
+
+    admin = _admin_client(db_session)
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+
+    tiny_jpeg = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+        b"\xff\xd9"
+    )
+    upload = admin.post(
+        "/api/blog/attachments/video-thumb-1/thumbnail",
+        files={"file": ("cover.jpg", tiny_jpeg, "image/jpeg")},
+    )
+    assert upload.status_code == 200
+    body = upload.json()
+    assert body["thumbnail_url"] == "/api/blog/attachments/video-thumb-1/thumbnail"
+
+    thumb = member.get("/api/blog/attachments/video-thumb-1/thumbnail")
+    assert thumb.status_code == 200
+    assert thumb.headers.get("content-type", "").startswith("image/")
+    assert thumb.content.startswith(b"\xff\xd8")
+
+
+def test_video_file_endpoint_rejects_download(db_session: Session) -> None:
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-no-dl",
+            stored_name="courses/no_dl.mp4",
+            original_filename="no_dl.mp4",
+            mime_type="video/mp4",
+            file_size=1024,
+            title_zh="不可下载",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/no_dl.mp4",
+        )
+    )
+    db_session.commit()
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    res = member.get("/api/blog/attachments/video-no-dl/file?download=true")
+    assert res.status_code == 404
+
