@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Annotated, BinaryIO, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -36,6 +36,14 @@ from app.services.blog_thumbnail import (
     thumbnail_mime_type,
 )
 from app.services.membership import V3Access, membership_public_fields
+from app.services.cache_service import (
+    cache_delete_pattern,
+    cache_get,
+    cache_set,
+    key_blog_courses,
+    key_blog_post_slug,
+    key_blog_posts,
+)
 from app.services.r2_storage import (
     R2StorageError,
     delete_object,
@@ -52,6 +60,19 @@ router = APIRouter(tags=["blog"])
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _MAX_COURSE_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
 _COURSE_VIDEO_MIME = "video/mp4"
+_BLOG_HTTP_CACHE_SECONDS = 120
+_BLOG_REDIS_CACHE_SECONDS = 180
+
+
+def _invalidate_blog_public_cache() -> None:
+    cache_delete_pattern("blog:*")
+
+
+def _set_public_cache_headers(response: Response, *, hit: bool) -> None:
+    cfg = get_settings()
+    max_age = max(30, int(cfg.blog_public_cache_seconds))
+    response.headers["Cache-Control"] = f"public, max-age={max_age}, stale-while-revalidate=60"
+    response.headers["X-Cache"] = "HIT" if hit else "MISS"
 
 
 class BlogAttachmentPublic(BaseModel):
@@ -555,6 +576,7 @@ def _list_categories(session: Session, *, published_only: bool) -> list[str]:
 
 @router.get("/api/blog/posts", response_model=BlogPostListResponse)
 def list_blog_posts(
+    response: Response,
     session: Session = Depends(db_session_dep),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -563,12 +585,20 @@ def list_blog_posts(
     admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
 ) -> BlogPostListResponse:
     show_drafts = include_drafts and admin is not None
+    category_key = category.strip() if category else ""
+    if not show_drafts:
+        cache_key = key_blog_posts(page=page, page_size=page_size, category=category_key)
+        cached = cache_get(cache_key)
+        if isinstance(cached, dict):
+            _set_public_cache_headers(response, hit=True)
+            return BlogPostListResponse.model_validate(cached)
+
     filters = []
     if not show_drafts:
         filters.append(BlogPostRow.status == "published")
 
     if category:
-        filters.append(BlogPostRow.category == category.strip())
+        filters.append(BlogPostRow.category == category_key)
 
     count_stmt = select(func.count()).select_from(BlogPostRow)
     list_stmt = select(BlogPostRow)
@@ -591,22 +621,35 @@ def list_blog_posts(
         .all()
     )
     counts = _attachment_count_map(session, [r.id for r in rows])
-    return BlogPostListResponse(
+    payload = BlogPostListResponse(
         items=[_to_summary(r, counts.get(r.id, 0)) for r in rows],
         total=total,
         page=page,
         page_size=page_size,
         categories=_list_categories(session, published_only=not show_drafts),
     )
+    if not show_drafts:
+        cache_set(cache_key, payload.model_dump(mode="json"), ttl=_BLOG_REDIS_CACHE_SECONDS)
+        _set_public_cache_headers(response, hit=False)
+    return payload
 
 
 @router.get("/api/blog/posts/{slug}", response_model=BlogPostDetail)
 def get_blog_post_by_slug(
     slug: str,
+    response: Response,
     session: Session = Depends(db_session_dep),
     admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
 ) -> BlogPostDetail:
-    row = session.execute(select(BlogPostRow).where(BlogPostRow.slug == slug)).scalar_one_or_none()
+    slug_norm = slug.strip().lower()
+    if admin is None:
+        cache_key = key_blog_post_slug(slug_norm)
+        cached = cache_get(cache_key)
+        if isinstance(cached, dict):
+            _set_public_cache_headers(response, hit=True)
+            return BlogPostDetail.model_validate(cached)
+
+    row = session.execute(select(BlogPostRow).where(BlogPostRow.slug == slug_norm)).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "文章不存在。"})
     if row.status != "published" and admin is None:
@@ -624,12 +667,16 @@ def get_blog_post_by_slug(
         .all()
     )
     summary = _to_summary(row, len(attachments))
-    return BlogPostDetail(
+    payload = BlogPostDetail(
         **summary.model_dump(),
         body_zh=row.body_zh,
         body_en=row.body_en,
         attachments=[_to_attachment_public(a) for a in attachments],
     )
+    if admin is None and row.status == "published":
+        cache_set(cache_key, payload.model_dump(mode="json"), ttl=_BLOG_REDIS_CACHE_SECONDS)
+        _set_public_cache_headers(response, hit=False)
+    return payload
 
 
 @router.get("/api/blog/attachments/{attachment_id}/file")
@@ -686,6 +733,7 @@ def list_blog_documents(
 
 @router.get("/api/blog/courses", response_model=BlogDocumentListResponse)
 def list_blog_courses(
+    response: Response,
     session: Session = Depends(db_session_dep),
     category: Optional[str] = Query(default=None),
     page: int = Query(1, ge=1),
@@ -694,7 +742,20 @@ def list_blog_courses(
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
     """Standalone course videos: ~30% teaser per category for guests, full library for members."""
-    return _list_standalone_media(
+    category_key = category.strip() if category else ""
+    cache_key = key_blog_courses(
+        is_member=access.is_member,
+        page=page,
+        page_size=page_size,
+        category=category_key,
+        sort=sort,
+    )
+    cached = cache_get(cache_key)
+    if isinstance(cached, dict):
+        _set_public_cache_headers(response, hit=True)
+        return BlogDocumentListResponse.model_validate(cached)
+
+    payload = _list_standalone_media(
         session,
         access,
         category=category,
@@ -703,6 +764,9 @@ def list_blog_courses(
         media_kind="video",
         sort=sort,
     )
+    cache_set(cache_key, payload.model_dump(mode="json"), ttl=_BLOG_REDIS_CACHE_SECONDS)
+    _set_public_cache_headers(response, hit=False)
+    return payload
 
 
 @router.get("/api/blog/courses/{attachment_id}", response_model=BlogAttachmentPublic)
@@ -929,6 +993,7 @@ async def upload_blog_attachment_thumbnail(
     session.add(row)
     session.commit()
     session.refresh(row)
+    _invalidate_blog_public_cache()
     return _to_attachment_public(row)
 
 
@@ -1049,6 +1114,7 @@ async def upload_blog_course(
         session.commit()
         session.refresh(attachment)
 
+    _invalidate_blog_public_cache()
     return BlogUploadCourseResponse(attachment=_to_attachment_public(attachment))
 
 
@@ -1106,6 +1172,7 @@ def update_blog_attachment(
     session.add(row)
     session.commit()
     session.refresh(row)
+    _invalidate_blog_public_cache()
     return _to_attachment_public(row)
 
 
@@ -1131,6 +1198,7 @@ def delete_blog_attachment(
         delete_pdf(row.stored_name)
     session.delete(row)
     session.commit()
+    _invalidate_blog_public_cache()
 
 
 @router.post("/api/blog/posts", response_model=BlogPostDetail, status_code=status.HTTP_201_CREATED)
@@ -1167,6 +1235,7 @@ def create_blog_post(
     session.add(row)
     session.commit()
     session.refresh(row)
+    _invalidate_blog_public_cache()
     return BlogPostDetail(**_to_summary(row).model_dump(), body_zh=row.body_zh, body_en=row.body_en, attachments=[])
 
 
@@ -1218,6 +1287,7 @@ def update_blog_post(
     session.add(row)
     session.commit()
     session.refresh(row)
+    _invalidate_blog_public_cache()
 
     attachments = (
         session.execute(select(BlogAttachmentRow).where(BlogAttachmentRow.post_id == row.id))
@@ -1252,9 +1322,7 @@ def delete_blog_post(
         session.delete(attachment)
     session.delete(row)
     session.commit()
-
-
-@router.post("/api/blog/upload-pdf", response_model=BlogUploadPdfResponse)
+    _invalidate_blog_public_cache()
 async def upload_blog_pdf(
     file: UploadFile = File(...),
     post_id: Optional[str] = Form(default=None),
@@ -1298,4 +1366,5 @@ async def upload_blog_pdf(
     session.add(attachment)
     session.commit()
     session.refresh(attachment)
+    _invalidate_blog_public_cache()
     return BlogUploadPdfResponse(attachment=_to_attachment_public(attachment), post_id=post_id)

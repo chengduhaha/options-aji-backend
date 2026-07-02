@@ -201,3 +201,23 @@ def key_unusual_leaderboard() -> str:
 
 def key_options_leaderboard(board: str) -> str:
     return f"options:leaderboard:v1:{board.strip().lower()}"
+
+
+def key_blog_posts(*, page: int, page_size: int, category: str) -> str:
+    return f"blog:posts:{page}:{page_size}:{category or '_all_'}"
+
+
+def key_blog_post_slug(slug: str) -> str:
+    return f"blog:post:{slug.strip().lower()}"
+
+
+def key_blog_courses(
+    *,
+    is_member: bool,
+    page: int,
+    page_size: int,
+    category: str,
+    sort: str,
+) -> str:
+    tier = "member" if is_member else "guest"
+    return f"blog:courses:{tier}:{page}:{page_size}:{category or '_all_'}:{sort}"

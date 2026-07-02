@@ -31,6 +31,8 @@ from app.api.routes.cross_market_diagnostics import router as cross_market_diag_
 from app.api.routes.dark_pool import router as dark_pool_router
 from app.api.routes.divergence import router as divergence_router
 from app.api.routes.earnings_symbol import router as earnings_symbol_router
+from app.api.routes.earnings_view import router as earnings_view_router
+from app.api.routes.etf import router as etf_router
 from app.api.routes.feed_ai import router as feed_ai_router
 from app.api.routes.feed_unified import router as feed_unified_router
 from app.api.routes.fusion import router as fusion_router
@@ -42,16 +44,19 @@ from app.api.routes.news import router as news_router
 from app.api.routes.mvp import router as mvp_router
 from app.api.routes.market_overview import router as market_overview_router
 from app.api.routes.market_dashboard import router as market_dashboard_router
+from app.api.routes.messages import router as messages_router
 from app.api.routes.options import router as options_router
+from app.api.routes.portfolio import router as portfolio_router
 from app.api.routes.profile import router as profile_router
 from app.api.routes.scanner import router as scanner_router
 from app.api.routes.signals_feed import router as signals_feed_router
 from app.api.routes.site_nav import router as site_nav_router
 from app.api.routes.social import router as social_router
 from app.api.routes.stock_detail import router as stock_detail_router
+from app.api.routes.stock_enhanced import router as stock_enhanced_router
 from app.api.routes.stock_sentiment import router as stock_sentiment_router
-from app.api.routes.supply_graph import router as supply_graph_router
 from app.api.routes.strategy_eval import router as strategy_eval_router
+from app.api.routes.watchlist import router as watchlist_router
 from app.api.schemas.response import ApiError, ApiFailure
 from app.config import get_settings
 from app.db.bootstrap import init_db
@@ -170,12 +175,15 @@ def create_application() -> FastAPI:
         )
         allow_credentials = False
 
+    openapi_on = bool(settings.openapi_enabled)
+
     app = FastAPI(
         title=settings.app_name,
         version="0.3.0",
         lifespan=lifespan,
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if openapi_on else None,
+        redoc_url="/redoc" if openapi_on else None,
+        openapi_url="/openapi.json" if openapi_on else None,
     )
 
     app.add_middleware(
@@ -185,6 +193,24 @@ def create_application() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+            response.headers.setdefault(
+                "Permissions-Policy",
+                "camera=(), microphone=(), geolocation=()",
+            )
+            if request.url.scheme == "https":
+                response.headers.setdefault(
+                    "Strict-Transport-Security",
+                    "max-age=31536000; includeSubDomains",
+                )
+        return response
 
     @app.middleware("http")
     async def request_observability_middleware(request: Request, call_next):
@@ -288,11 +314,16 @@ def create_application() -> FastAPI:
     app.include_router(market_overview_router)
     app.include_router(fusion_router)
     app.include_router(market_dashboard_router)
+    app.include_router(stock_enhanced_router)
     app.include_router(stock_detail_router)
     app.include_router(options_router)
-    app.include_router(supply_graph_router)
     app.include_router(profile_router)
+    app.include_router(earnings_view_router)
     app.include_router(earnings_symbol_router)
+    app.include_router(etf_router)
+    app.include_router(messages_router)
+    app.include_router(portfolio_router)
+    app.include_router(watchlist_router)
     app.include_router(scanner_router)
     app.include_router(social_router)
     app.include_router(strategy_eval_router)

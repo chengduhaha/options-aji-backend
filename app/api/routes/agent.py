@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
@@ -22,6 +22,7 @@ from app.agents.user_agent import (
 )
 from app.api.billing_access import ensure_agent_billing
 from app.config import get_settings
+from app.services.auth_rate_limit import agent_query_rate_limited
 from app.services.social_sentiment import build_smart_vs_retail
 
 router = APIRouter(tags=["agent"])
@@ -164,9 +165,20 @@ async def _run_thread_with_heartbeats(
 @router.post("/api/agent/query")
 async def agent_query_stream(
     body: AgentQueryPayload,
+    request: Request,
     _: str = Depends(ensure_agent_billing),
 ) -> StreamingResponse:
     """SSE 流：`thinking` → `data_fetched` → `answer` → `done`。"""
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if forwarded:
+        client_ip = forwarded
+    if agent_query_rate_limited(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "rate_limited", "message": "AI 请求过于频繁，请稍后再试。"},
+        )
+
     cfg = get_settings()
     locale = body.locale if body.locale in {"zh", "en"} else "zh"
     if not cfg.feature_deep_agent_enabled:

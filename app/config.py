@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     feed_enrichment_model: str = ""
 
     # ── Xiaomi MiMo LLM (OpenAI-compatible) ───────────────────────────────────
-    xiaomi_api_key: str = "tp-c919p7m8394hxs9jsf5oqxma5ok85yil9qsa99jngzp9ormw"
+    xiaomi_api_key: str = ""
     xiaomi_base_url: str = "https://api.xiaomimimo.com/v1"
     xiaomi_model: str = "mimo-v2.5"
 
@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     auth_register_rate_limit_enabled: bool = True
     auth_register_max_per_hour: int = 10
     auth_register_window_seconds: int = 3600
+    auth_login_ip_rate_limit_enabled: bool = True
+    auth_login_ip_max_per_hour: int = 60
+    agent_query_ip_rate_limit_enabled: bool = True
+    agent_query_ip_max_per_minute: int = 10
     auth_verification_code_ttl_seconds: int = 900
     auth_verification_max_attempts: int = 5
     auth_verification_debug_expose_code: bool = False
@@ -193,6 +197,8 @@ class Settings(BaseSettings):
     blog_upload_dir: str = "./data/blog/pdfs"
     blog_play_token_ttl_seconds: int = 600
     blog_video_guest_preview_seconds: int = 180
+    blog_public_cache_seconds: int = 120
+    openapi_enabled: bool = True
     #: When true, stream endpoint redirects to a short-lived R2 presigned URL.
     blog_video_stream_redirect: bool = False
 

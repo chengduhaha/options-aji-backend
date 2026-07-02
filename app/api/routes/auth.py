@@ -22,6 +22,7 @@ from app.services.activation_codes import redeem_activation_code
 from app.services.auth_rate_limit import (
     clear_login_failure,
     is_login_locked,
+    login_ip_rate_limited,
     record_login_failure,
     register_rate_limited,
 )
@@ -626,6 +627,12 @@ async def login(
     settings = get_settings()
     ip = _client_ip(request)
     _verify_turnstile_or_raise(settings=settings, token=body.turnstile_token, ip=ip, action="login")
+
+    if login_ip_rate_limited(ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "rate_limited", "message": "登录请求过于频繁，请稍后再试。"},
+        )
 
     email = _norm_email(str(body.email))
     if is_login_locked(email):

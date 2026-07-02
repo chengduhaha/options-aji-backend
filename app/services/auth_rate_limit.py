@@ -92,6 +92,46 @@ def redeem_rate_limited(client_ip: str) -> bool:
         return False
 
 
+def login_ip_rate_limited(client_ip: str) -> bool:
+    """Return True if login attempts from this IP should be blocked."""
+    cfg = get_settings()
+    if not cfg.auth_login_ip_rate_limit_enabled:
+        return False
+    r = _client()
+    if r is None:
+        return False
+    max_per = max(1, int(cfg.auth_login_ip_max_per_hour))
+    key = f"auth:login_ip_rl:{client_ip}"
+    try:
+        n = int(r.incr(key))
+        if n == 1:
+            r.expire(key, 3600)
+        return n > max_per
+    except Exception as exc:
+        logger.debug("login_ip_rate_limited redis error: %s", exc)
+        return False
+
+
+def agent_query_rate_limited(client_ip: str) -> bool:
+    """Return True if agent/chat queries from this IP should be blocked."""
+    cfg = get_settings()
+    if not cfg.agent_query_ip_rate_limit_enabled:
+        return False
+    r = _client()
+    if r is None:
+        return False
+    max_per = max(1, int(cfg.agent_query_ip_max_per_minute))
+    key = f"auth:agent_rl:{client_ip}"
+    try:
+        n = int(r.incr(key))
+        if n == 1:
+            r.expire(key, 60)
+        return n > max_per
+    except Exception as exc:
+        logger.debug("agent_query_rate_limited redis error: %s", exc)
+        return False
+
+
 def generate_codes_rate_limited(admin_id: str) -> bool:
     """Return True if admin code generation should be blocked."""
     r = _client()
