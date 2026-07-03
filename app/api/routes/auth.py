@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.api.deps_auth import get_current_admin_user, get_current_user
 from app.config import Settings, get_settings
 from app.db.models import AccessKeyRow
-from app.db.models_user import UserEmailVerificationRow, UserRow
+from app.db.models_user import ActivationCodeRow, UserEmailVerificationRow, UserRow
 from app.db.session import db_session_dep
 from app.services.activation_codes import redeem_activation_code
 from app.services.auth_rate_limit import (
@@ -158,8 +158,18 @@ class UserAccessKeySummary(BaseModel):
     latest_last_used_at: Optional[datetime] = None
 
 
+class UserActivationCodeSummary(BaseModel):
+    code_prefix: Optional[str] = None
+    duration_tier: Optional[str] = None
+    duration_days: Optional[int] = None
+    redeemed_at: Optional[datetime] = None
+    status: Optional[str] = None
+
+
 class AdminUserPublic(UserPublic):
+    last_login_at: Optional[datetime] = None
     access_keys: UserAccessKeySummary = Field(default_factory=UserAccessKeySummary)
+    activation_code: UserActivationCodeSummary = Field(default_factory=UserActivationCodeSummary)
 
 
 class TokenResponse(BaseModel):
@@ -250,9 +260,44 @@ def _access_key_summary_for(row: UserRow, keys: list[AccessKeyRow]) -> UserAcces
     )
 
 
-def _to_admin_public(row: UserRow, keys: list[AccessKeyRow]) -> AdminUserPublic:
+def _activation_code_summary_for(
+    row: UserRow,
+    codes: list[ActivationCodeRow],
+) -> UserActivationCodeSummary:
+    """Pick the most recently redeemed activation code bound to this user.
+
+    A user should only ever have one redeemed code, but defensively take the
+    latest by redeemed_at in case of data anomalies.
+    """
+    matched = [c for c in codes if c.redeemed_by_user_id == row.id and c.status == "redeemed"]
+    if not matched:
+        return UserActivationCodeSummary()
+    latest = sorted(
+        matched,
+        key=lambda c: c.redeemed_at or c.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )[0]
+    return UserActivationCodeSummary(
+        code_prefix=latest.code_prefix,
+        duration_tier=latest.duration_tier,
+        duration_days=latest.duration_days,
+        redeemed_at=latest.redeemed_at,
+        status=latest.status,
+    )
+
+
+def _to_admin_public(
+    row: UserRow,
+    keys: list[AccessKeyRow],
+    activation_codes: list[ActivationCodeRow],
+) -> AdminUserPublic:
     base = _to_public(row).model_dump()
-    return AdminUserPublic(**base, access_keys=_access_key_summary_for(row, keys))
+    return AdminUserPublic(
+        **base,
+        last_login_at=row.last_login_at,
+        access_keys=_access_key_summary_for(row, keys),
+        activation_code=_activation_code_summary_for(row, activation_codes),
+    )
 
 
 def _hash_verification_code(code: str) -> str:
@@ -764,7 +809,10 @@ async def admin_list_users(
 ) -> list[AdminUserPublic]:
     rows = session.execute(select(UserRow).order_by(UserRow.created_at.desc())).scalars().all()
     access_keys = session.execute(select(AccessKeyRow)).scalars().all()
-    return [_to_admin_public(r, list(access_keys)) for r in rows]
+    activation_codes = session.execute(
+        select(ActivationCodeRow).where(ActivationCodeRow.status == "redeemed")
+    ).scalars().all()
+    return [_to_admin_public(r, list(access_keys), list(activation_codes)) for r in rows]
 
 
 @router.patch("/admin/users/{user_id}", response_model=UserPublic)

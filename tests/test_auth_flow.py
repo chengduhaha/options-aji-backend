@@ -17,6 +17,7 @@ from app.db.models import Base
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
 from app.services.access_keys import create_access_key, validate_access_key
+from app.services.activation_codes import generate_activation_codes, redeem_activation_code
 from app.services.passwords import hash_password
 
 
@@ -421,6 +422,85 @@ def test_admin_users_include_access_key_summary(monkeypatch) -> None:
     assert paid["access_keys"]["active"] == 1
     assert paid["access_keys"]["latest_key_prefix"].startswith("aji_paid_")
     assert paid["access_keys"]["latest_days_remaining"] >= 29
+    # Activation code summary is present (empty for this user) and kept for
+    # backward compatibility alongside the legacy access_keys block.
+    assert "activation_code" in paid
+    assert paid["activation_code"]["code_prefix"] is None
+    assert paid["activation_code"]["status"] is None
+
+
+def test_admin_users_include_activation_code_summary(monkeypatch) -> None:
+    _apply_auth_test_patches(monkeypatch)
+    client = _build_client()
+
+    with client as test_client:
+        app = test_client.app
+        override_db = app.dependency_overrides[db_session_dep]
+        session_gen = override_db()
+        session = next(session_gen)
+        try:
+            admin = UserRow(
+                email="admin@example.com",
+                password_hash=hash_password("Passw0rd1"),
+                role="admin",
+                email_verified=True,
+            )
+            member = UserRow(
+                email="member@example.com",
+                password_hash=hash_password("Passw0rd1"),
+                role="user",
+                email_verified=True,
+            )
+            free = UserRow(
+                email="free@example.com",
+                password_hash=hash_password("Passw0rd1"),
+                role="user",
+                email_verified=True,
+            )
+            session.add_all([admin, member, free])
+            session.commit()
+            session.refresh(admin)
+
+            _, codes = generate_activation_codes(
+                session,
+                duration_tier="30D",
+                count=1,
+                admin=admin,
+            )
+            redeem_activation_code(
+                session,
+                user=member,
+                raw_code=codes[0],
+                client_ip="127.0.0.1",
+            )
+        finally:
+            session.close()
+            try:
+                next(session_gen)
+            except StopIteration:
+                pass
+
+    login_resp = client.post(
+        "/api/auth/login",
+        json={"email": "admin@example.com", "password": "Passw0rd1"},
+    )
+    assert login_resp.status_code == 200
+    token = login_resp.json()["access_token"]
+
+    users_resp = client.get("/api/auth/admin/users", headers={"Authorization": f"Bearer {token}"})
+    assert users_resp.status_code == 200
+    rows = users_resp.json()
+
+    member_row = next(row for row in rows if row["email"] == "member@example.com")
+    assert member_row["activation_code"]["status"] == "redeemed"
+    assert member_row["activation_code"]["code_prefix"].startswith("OAJI-30D-")
+    assert member_row["activation_code"]["duration_tier"] == "30D"
+    assert member_row["activation_code"]["duration_days"] == 30
+    assert member_row["activation_code"]["redeemed_at"] is not None
+
+    free_row = next(row for row in rows if row["email"] == "free@example.com")
+    assert free_row["activation_code"]["code_prefix"] is None
+    assert free_row["activation_code"]["status"] is None
 
 
 def test_register_fails_when_email_send_fails(monkeypatch) -> None:
