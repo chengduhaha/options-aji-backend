@@ -459,6 +459,19 @@ def _video_r2_key(attachment: BlogAttachmentRow) -> str:
     return key
 
 
+def _play_token_ttl_seconds() -> int:
+    return min(600, max(60, int(get_settings().blog_play_token_ttl_seconds)))
+
+
+def _video_presigned_stream_url(row: BlogAttachmentRow, *, ttl_seconds: int | None = None) -> str:
+    ttl = ttl_seconds if ttl_seconds is not None else _play_token_ttl_seconds()
+    return presigned_get_url(
+        _video_r2_key(row),
+        expires_in=ttl,
+        response_content_disposition=_content_disposition("inline", row.original_filename),
+    )
+
+
 def _parse_range_header(range_header: str, total_size: int) -> tuple[int, int]:
     match = re.match(r"bytes=(\d+)-(\d*)", range_header.strip())
     if not match or total_size <= 0:
@@ -820,10 +833,21 @@ def create_blog_play_token(
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
 
     token, expires_at = create_play_token(attachment_id=row.id, preview=preview)
-    stream_url = f"/api/blog/attachments/{row.id}/stream?ticket={quote(token, safe='')}"
+    cfg = get_settings()
     preview_seconds = None
     if preview:
-        preview_seconds = max(1, int(get_settings().blog_video_guest_preview_seconds))
+        preview_seconds = max(1, int(cfg.blog_video_guest_preview_seconds))
+
+    if cfg.blog_video_stream_redirect:
+        try:
+            stream_url = _video_presigned_stream_url(row)
+        except R2StorageError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "stream_failed", "message": str(exc)},
+            ) from exc
+    else:
+        stream_url = f"/api/blog/attachments/{row.id}/stream?ticket={quote(token, safe='')}"
 
     return BlogPlayTokenResponse(
         token=token,
@@ -849,29 +873,30 @@ def stream_blog_video(
     if payload is None or payload.get("attachment_id") != attachment_id:
         raise HTTPException(status_code=403, detail={"code": "invalid_ticket", "message": "播放凭证无效或已过期。"})
 
-    key = _video_r2_key(row)
     cfg = get_settings()
     if cfg.blog_video_stream_redirect:
         try:
-            url = presigned_get_url(
-                key,
-                expires_in=min(600, max(60, int(cfg.blog_play_token_ttl_seconds))),
-                response_content_disposition=_content_disposition("inline", row.original_filename),
-            )
+            url = _video_presigned_stream_url(row)
         except R2StorageError as exc:
             raise HTTPException(status_code=503, detail={"code": "stream_failed", "message": str(exc)}) from exc
         return RedirectResponse(url=url, status_code=302)
 
+    key = _video_r2_key(row)
     try:
         total_size = head_object_size(key)
     except R2StorageError as exc:
         raise HTTPException(status_code=404, detail={"code": "file_missing", "message": str(exc)}) from exc
 
+    # Cap initial probe when the client omits Range — avoids proxying multi-GB MP4s through FastAPI.
+    _MAX_INITIAL_BYTES = 4 * 1024 * 1024
     range_header = request.headers.get("range")
     if range_header:
         start, end = _parse_range_header(range_header, total_size)
+        is_capped_initial = False
     else:
-        start, end = 0, total_size - 1
+        start = 0
+        end = min(total_size - 1, _MAX_INITIAL_BYTES - 1) if total_size > 0 else 0
+        is_capped_initial = True
 
     try:
         fetched = fetch_object_range(key, byte_start=start, byte_end=end)
@@ -883,8 +908,12 @@ def stream_blog_video(
         "Content-Type": fetched.content_type or row.mime_type,
         "Content-Disposition": _content_disposition("inline", row.original_filename),
     }
-    status_code = status.HTTP_206_PARTIAL_CONTENT if range_header else status.HTTP_200_OK
-    if range_header:
+    status_code = (
+        status.HTTP_206_PARTIAL_CONTENT
+        if range_header or is_capped_initial
+        else status.HTTP_200_OK
+    )
+    if range_header or is_capped_initial:
         headers["Content-Range"] = f"bytes {fetched.range_start}-{fetched.range_end}/{fetched.total_size}"
         headers["Content-Length"] = str(fetched.content_length)
 

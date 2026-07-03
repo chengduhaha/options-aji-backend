@@ -199,8 +199,9 @@ class Settings(BaseSettings):
     blog_video_guest_preview_seconds: int = 180
     blog_public_cache_seconds: int = 120
     openapi_enabled: bool = True
-    #: When true, stream endpoint redirects to a short-lived R2 presigned URL.
-    blog_video_stream_redirect: bool = False
+    #: When true, play-token returns a short-lived R2 presigned URL and the stream
+    #: endpoint redirects instead of proxying bytes through FastAPI.
+    blog_video_stream_redirect: bool = True
 
     # ── Cloudflare R2 (course videos / large media) ───────────────────────────
     r2_account_id: str = ""

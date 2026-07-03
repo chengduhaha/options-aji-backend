@@ -590,6 +590,42 @@ def test_blog_courses_sort_and_single_get(db_session: Session) -> None:
     assert "thumbnail_url" in body
 
 
+def test_play_token_returns_presigned_url_by_default(db_session: Session, monkeypatch) -> None:
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-pytest")
+    db_session.add(
+        BlogAttachmentRow(
+            id="video-presigned-1",
+            stored_name="courses/full.mp4",
+            original_filename="full.mp4",
+            mime_type="video/mp4",
+            file_size=2048,
+            title_zh="完整课程",
+            category="course",
+            is_sample=False,
+            media_kind="video",
+            r2_key="courses/full.mp4",
+        )
+    )
+    db_session.commit()
+
+    member = _client_with_access(
+        db_session,
+        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+    )
+    monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+    monkeypatch.setattr(
+        "app.api.routes.blog.presigned_get_url",
+        lambda *_args, **_kwargs: "https://signed.example/courses/full.mp4?X-Amz-Signature=abc",
+    )
+
+    token_res = member.post("/api/blog/attachments/video-presigned-1/play-token")
+    assert token_res.status_code == 200
+    body = token_res.json()
+    assert body["preview"] is False
+    assert body["stream_url"].startswith("https://signed.example/")
+    assert "ticket=" not in body["stream_url"]
+
+
 def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch) -> None:
     monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-pytest")
     db_session.add(
@@ -613,6 +649,18 @@ def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch
         V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
     )
     monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
+    monkeypatch.setattr(
+        "app.api.routes.blog.get_settings",
+        lambda: type(
+            "Cfg",
+            (),
+            {
+                "blog_video_stream_redirect": False,
+                "blog_play_token_ttl_seconds": 600,
+                "blog_video_guest_preview_seconds": 180,
+            },
+        )(),
+    )
     token_res = member.post("/api/blog/attachments/video-member-1/play-token")
     assert token_res.status_code == 200
     body = token_res.json()
@@ -640,8 +688,8 @@ def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch
     monkeypatch.setattr("app.api.routes.blog.head_object_size", lambda _key: 108)
     monkeypatch.setattr("app.api.routes.blog.fetch_object_range", _fake_fetch)
 
-    stream_res = member.get(body["stream_url"])
-    assert stream_res.status_code == 200
+    stream_res = member.get(body["stream_url"], headers={"Range": "bytes=0-"})
+    assert stream_res.status_code == 206
     assert stream_res.headers.get("content-type", "").startswith("video/")
     assert b"ftyp" in stream_res.content
 
