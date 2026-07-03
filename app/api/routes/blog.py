@@ -1340,6 +1340,9 @@ def delete_blog_post(
     session.delete(row)
     session.commit()
     _invalidate_blog_public_cache()
+
+
+@router.post("/api/blog/upload-pdf", response_model=BlogUploadPdfResponse)
 async def upload_blog_pdf(
     file: UploadFile = File(...),
     post_id: Optional[str] = Form(default=None),
