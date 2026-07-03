@@ -45,6 +45,7 @@ class ActivationCodePublic(BaseModel):
     duration_days: int
     status: str
     redeemed_by_user_id: Optional[str]
+    redeemed_by_email: Optional[str] = None
     redeemed_at: Optional[datetime]
     batch_id: Optional[str]
     note: Optional[str]
@@ -89,4 +90,25 @@ def admin_list_codes(
     if status_filter:
         q = q.where(ActivationCodeRow.status == status_filter.strip().lower())
     rows = session.execute(q).scalars().all()
-    return [ActivationCodePublic.model_validate(row) for row in rows]
+    # Resolve redeemed_by_email in a single query to avoid N+1 lookups.
+    redeemed_user_ids = {row.redeemed_by_user_id for row in rows if row.redeemed_by_user_id}
+    email_by_id: dict[str, str] = {}
+    if redeemed_user_ids:
+        users = session.execute(select(UserRow).where(UserRow.id.in_(redeemed_user_ids))).scalars().all()
+        email_by_id = {u.id: u.email for u in users}
+    return [
+        ActivationCodePublic(
+            id=row.id,
+            code_prefix=row.code_prefix,
+            duration_tier=row.duration_tier,
+            duration_days=row.duration_days,
+            status=row.status,
+            redeemed_by_user_id=row.redeemed_by_user_id,
+            redeemed_by_email=email_by_id.get(row.redeemed_by_user_id) if row.redeemed_by_user_id else None,
+            redeemed_at=row.redeemed_at,
+            batch_id=row.batch_id,
+            note=row.note,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
