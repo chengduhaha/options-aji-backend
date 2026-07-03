@@ -130,6 +130,62 @@ def test_generate_and_redeem_code(monkeypatch) -> None:
     assert dup.status_code == 409
 
 
+def test_7d_code_grants_exactly_seven_days_without_stacking(monkeypatch) -> None:
+    _apply_auth_patches(monkeypatch)
+    _, SessionLocal = _build_client(auth_router, activation_codes_router)
+
+    with SessionLocal() as session:
+        admin = UserRow(
+            email="admin@test.com",
+            password_hash=hash_password("Admin1234"),
+            role="admin",
+            email_verified=True,
+        )
+        user = UserRow(
+            email="trial-stack@test.com",
+            password_hash=hash_password("Secret123"),
+            role="user",
+            email_verified=True,
+            membership_kind="trial",
+            membership_expires_at=datetime.now(timezone.utc) + timedelta(days=10),
+        )
+        session.add_all([admin, user])
+        session.commit()
+        session.refresh(admin)
+
+        _, codes = generate_activation_codes(
+            session,
+            duration_tier="7D",
+            count=2,
+            admin=admin,
+        )
+        from app.services.activation_codes import redeem_activation_code
+        from app.services.membership import _as_aware
+
+        first = redeem_activation_code(
+            session,
+            user=user,
+            raw_code=codes[0],
+            client_ip="127.0.0.1",
+        )
+        first_expires = _as_aware(first.membership_expires_at)
+        assert first_expires is not None
+        first_remaining = first_expires - datetime.now(timezone.utc)
+        assert 6 <= first_remaining.days <= 7
+
+        session.refresh(user)
+        second = redeem_activation_code(
+            session,
+            user=user,
+            raw_code=codes[1],
+            client_ip="127.0.0.1",
+        )
+        second_expires = _as_aware(second.membership_expires_at)
+        assert second_expires is not None
+        second_remaining = second_expires - datetime.now(timezone.utc)
+        assert 6 <= second_remaining.days <= 7
+
+
 def test_stack_renewal_extends_from_current_expiry(monkeypatch) -> None:
     _apply_auth_patches(monkeypatch)
     _, SessionLocal = _build_client(auth_router, activation_codes_router)

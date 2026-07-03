@@ -44,6 +44,30 @@ def _stack_expiry(current: datetime | None, duration_days: int, *, now: datetime
     return base + timedelta(days=duration_days)
 
 
+def _compute_membership_expiry(
+    *,
+    current: datetime | None,
+    duration_tier: str,
+    duration_days: int,
+    membership_kind: str | None,
+    now: datetime,
+) -> datetime:
+    """7D trial codes grant exactly duration_days from redeem time (no stacking).
+
+    Paid tiers (30D/365D) stack on any active membership. Full members redeeming
+    a 7D code keep their later full expiry (trial codes must not shorten paid time).
+    """
+    if duration_tier == "7D":
+        trial_expires = now + timedelta(days=duration_days)
+        kind = (membership_kind or "").strip().lower()
+        if kind == "full" and current is not None:
+            aware = current if current.tzinfo else current.replace(tzinfo=timezone.utc)
+            if aware > trial_expires:
+                return aware
+        return trial_expires
+    return _stack_expiry(current, duration_days, now=now)
+
+
 def generate_activation_codes(
     session: Session,
     *,
@@ -149,7 +173,13 @@ def redeem_activation_code(
     locked_user = session.execute(
         select(UserRow).where(UserRow.id == user.id).with_for_update()
     ).scalar_one()
-    new_expires = _stack_expiry(locked_user.membership_expires_at, row.duration_days, now=now)
+    new_expires = _compute_membership_expiry(
+        current=locked_user.membership_expires_at,
+        duration_tier=row.duration_tier,
+        duration_days=row.duration_days,
+        membership_kind=locked_user.membership_kind,
+        now=now,
+    )
 
     row.status = "redeemed"
     row.redeemed_by_user_id = locked_user.id
