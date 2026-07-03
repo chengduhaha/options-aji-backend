@@ -221,3 +221,14 @@ def key_blog_courses(
 ) -> str:
     tier = "member" if is_member else "guest"
     return f"blog:courses:{tier}:{page}:{page_size}:{category or '_all_'}:{sort}"
+
+
+def key_blog_documents(
+    *,
+    is_member: bool,
+    page: int,
+    page_size: int,
+    category: str,
+) -> str:
+    tier = "member" if is_member else "guest"
+    return f"blog:documents:{tier}:{page}:{page_size}:{category or '_all_'}"

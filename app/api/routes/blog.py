@@ -41,6 +41,7 @@ from app.services.cache_service import (
     cache_get,
     cache_set,
     key_blog_courses,
+    key_blog_documents,
     key_blog_post_slug,
     key_blog_posts,
 )
@@ -71,7 +72,7 @@ def _invalidate_blog_public_cache() -> None:
 def _set_public_cache_headers(response: Response, *, hit: bool) -> None:
     cfg = get_settings()
     max_age = max(30, int(cfg.blog_public_cache_seconds))
-    response.headers["Cache-Control"] = f"public, max-age={max_age}, stale-while-revalidate=60"
+    response.headers["Cache-Control"] = f"public, max-age={max_age}"
     response.headers["X-Cache"] = "HIT" if hit else "MISS"
 
 
@@ -714,6 +715,7 @@ def download_blog_attachment(
 
 @router.get("/api/blog/documents", response_model=BlogDocumentListResponse)
 def list_blog_documents(
+    response: Response,
     session: Session = Depends(db_session_dep),
     category: Optional[str] = Query(default=None),
     page: int = Query(1, ge=1),
@@ -721,7 +723,19 @@ def list_blog_documents(
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
     """Standalone PDF documents: ~30% teaser per category for guests, full archive for members."""
-    return _list_standalone_media(
+    category_key = category.strip() if category else ""
+    cache_key = key_blog_documents(
+        is_member=access.is_member,
+        page=page,
+        page_size=page_size,
+        category=category_key,
+    )
+    cached = cache_get(cache_key)
+    if isinstance(cached, dict):
+        _set_public_cache_headers(response, hit=True)
+        return BlogDocumentListResponse.model_validate(cached)
+
+    payload = _list_standalone_media(
         session,
         access,
         category=category,
@@ -729,6 +743,9 @@ def list_blog_documents(
         page_size=page_size,
         media_kind="document",
     )
+    cache_set(cache_key, payload.model_dump(mode="json"), ttl=_BLOG_REDIS_CACHE_SECONDS)
+    _set_public_cache_headers(response, hit=False)
+    return payload
 
 
 @router.get("/api/blog/courses", response_model=BlogDocumentListResponse)
