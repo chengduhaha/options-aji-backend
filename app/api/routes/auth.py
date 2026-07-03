@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -36,6 +36,47 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+#: Name of the auth presence cookie mirrored alongside the JWT returned in JSON.
+#: HttpOnly + Secure + SameSite=Lax; middleware reads it for /admin guard,
+#: frontend continues to use the JWT stored in localStorage for Authorization.
+AUTH_COOKIE_NAME = "optionsaji_jwt"
+
+
+def _auth_cookie_max_age(settings: Settings) -> int:
+    # getattr fallback keeps unit tests that patch get_settings with a
+    # minimal SimpleNamespace from blowing up on cookie max-age.
+    expire_hours = int(getattr(settings, "jwt_expire_hours", 24) or 24)
+    return max(60, expire_hours * 3600)
+
+
+def _set_auth_cookie(response: Response, *, token: str, settings: Settings) -> None:
+    """Mirror the JWT in an HttpOnly cookie so server-side middleware can guard
+    authenticated routes (e.g. /admin) without access to localStorage. The
+    frontend continues to read the token from localStorage for Authorization
+    headers; this cookie is purely a presence signal for edge middleware."""
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=_auth_cookie_max_age(settings),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value="",
+        max_age=0,
+        expires=0,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
 
 
 def _norm_email(email: str) -> str:
@@ -549,8 +590,10 @@ async def register_resend(
 @router.post("/register/verify", response_model=TokenResponse)
 async def register_verify(
     body: RegisterVerifyBody,
+    response: Response,
     session: Session = Depends(db_session_dep),
 ) -> TokenResponse:
+    settings = get_settings()
     email = _norm_email(str(body.email))
     code = body.code.strip()
     if not code:
@@ -573,6 +616,7 @@ async def register_verify(
         )
     if row.email_verified:
         token = create_access_token(user_id=row.id, email=row.email, role=row.role)
+        _set_auth_cookie(response, token=token, settings=settings)
         return TokenResponse(access_token=token, user=_to_public(row))
 
     verify = _latest_pending_verification(session, row.id)
@@ -615,6 +659,7 @@ async def register_verify(
     session.refresh(row)
     logger.info("Email verified user_id=%s email=%s", row.id, row.email)
     token = create_access_token(user_id=row.id, email=row.email, role=row.role)
+    _set_auth_cookie(response, token=token, settings=settings)
     return TokenResponse(access_token=token, user=_to_public(row))
 
 
@@ -622,6 +667,7 @@ async def register_verify(
 async def login(
     body: LoginBody,
     request: Request,
+    response: Response,
     session: Session = Depends(db_session_dep),
 ) -> TokenResponse:
     settings = get_settings()
@@ -667,6 +713,7 @@ async def login(
     session.commit()
 
     token = create_access_token(user_id=row.id, email=row.email, role=row.role)
+    _set_auth_cookie(response, token=token, settings=settings)
     return TokenResponse(access_token=token, user=_to_public(row))
 
 
@@ -701,8 +748,12 @@ async def redeem_code(
 
 
 @router.post("/logout")
-async def logout(user: Annotated[UserRow, Depends(get_current_user)]) -> dict[str, bool]:
+async def logout(
+    response: Response,
+    user: Annotated[UserRow, Depends(get_current_user)],
+) -> dict[str, bool]:
     logger.debug("Logout user id=%s", user.id)
+    _clear_auth_cookie(response)
     return {"success": True}
 
 
