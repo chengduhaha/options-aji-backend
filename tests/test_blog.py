@@ -18,6 +18,54 @@ from app.db.models_user import UserRow
 from app.db.session import db_session_dep
 from app.main import create_application
 from app.services.membership import V3Access
+from app.services.cache_service import cache_delete_pattern
+
+
+@pytest.fixture(autouse=True)
+def _clear_blog_cache() -> Generator[None, None, None]:
+    cache_delete_pattern("blog:*")
+    yield
+    cache_delete_pattern("blog:*")
+
+
+def _guest_access() -> V3Access:
+    return V3Access(
+        tier="guest",
+        is_member=False,
+        is_full_member=False,
+        is_trial_member=False,
+        membership_kind=None,
+        membership_expires_at=None,
+        days_remaining=None,
+    )
+
+
+def _full_member_access(**overrides: object) -> V3Access:
+    fields = {
+        "tier": "member",
+        "is_member": True,
+        "is_full_member": True,
+        "is_trial_member": False,
+        "membership_kind": "full",
+        "membership_expires_at": None,
+        "days_remaining": 30,
+    }
+    fields.update(overrides)
+    return V3Access(**fields)  # type: ignore[arg-type]
+
+
+def _trial_member_access(**overrides: object) -> V3Access:
+    fields = {
+        "tier": "member",
+        "is_member": True,
+        "is_full_member": False,
+        "is_trial_member": True,
+        "membership_kind": "trial",
+        "membership_expires_at": None,
+        "days_remaining": 7,
+    }
+    fields.update(overrides)
+    return V3Access(**fields)  # type: ignore[arg-type]
 
 
 @pytest.fixture()
@@ -308,7 +356,7 @@ def test_member_documents_include_non_sample_standalone_pdfs(db_session: Session
 
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     guest_res = guest.get("/api/blog/documents")
     assert guest_res.status_code == 200
@@ -319,7 +367,7 @@ def test_member_documents_include_non_sample_standalone_pdfs(db_session: Session
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     member_res = member.get("/api/blog/documents")
     assert member_res.status_code == 200
@@ -377,7 +425,7 @@ def test_guest_teaser_thirty_percent_per_category(db_session: Session, tmp_path,
 
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     res = guest.get("/api/blog/documents")
     assert res.status_code == 200
@@ -453,14 +501,14 @@ def test_member_only_pdf_download_requires_member_access(db_session: Session, tm
 
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     assert guest.get("/api/blog/attachments/locked-doc-1/file").status_code == 200
     assert guest.get("/api/blog/attachments/extra-doc-3/file").status_code == 404
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     download = member.get("/api/blog/attachments/locked-doc-1/file")
     assert download.status_code == 200
@@ -494,7 +542,7 @@ def test_member_documents_pagination(db_session: Session, tmp_path, monkeypatch)
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     page1 = member.get("/api/blog/documents?page=1&page_size=20")
     assert page1.status_code == 200
@@ -533,7 +581,7 @@ def test_list_blog_courses_guest_teaser(db_session: Session) -> None:
 
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     res = guest.get("/api/blog/courses")
     assert res.status_code == 200
@@ -569,7 +617,7 @@ def test_blog_courses_sort_and_single_get(db_session: Session) -> None:
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     newest = member.get("/api/blog/courses?sort=newest&page_size=10")
     assert newest.status_code == 200
@@ -610,7 +658,7 @@ def test_play_token_returns_presigned_url_by_default(db_session: Session, monkey
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
     monkeypatch.setattr(
@@ -646,7 +694,7 @@ def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
     monkeypatch.setattr(
@@ -717,7 +765,7 @@ def test_guest_cannot_play_token_locked_video(db_session: Session, monkeypatch) 
 
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
     locked = guest.post("/api/blog/attachments/locked-video-3/play-token")
@@ -757,7 +805,7 @@ def test_guest_teaser_uses_filename_date_for_newest(db_session: Session, tmp_pat
 
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     res = guest.get("/api/blog/documents?category=course")
     assert res.status_code == 200
@@ -791,7 +839,7 @@ def test_upload_and_serve_video_thumbnail(db_session: Session, tmp_path, monkeyp
     admin = _admin_client(db_session)
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
 
     tiny_jpeg = (
@@ -837,7 +885,7 @@ def test_guest_can_fetch_member_only_video_thumbnail(db_session: Session, tmp_pa
     admin = _admin_client(db_session)
     guest = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
 
     tiny_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82"
@@ -874,7 +922,7 @@ def test_thumbnail_url_uses_cdn_when_configured(db_session: Session, monkeypatch
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     res = member.get("/api/blog/courses")
     assert res.status_code == 200
@@ -1044,7 +1092,7 @@ def test_blog_posts_pagination(db_session: Session) -> None:
 
     client = _client_with_access(
         db_session,
-        V3Access(tier="guest", is_member=False, membership_expires_at=None, days_remaining=None),
+        _guest_access(),
     )
     page1 = client.get("/api/blog/posts?page=1&page_size=12")
     assert page1.status_code == 200
@@ -1082,8 +1130,57 @@ def test_video_file_endpoint_rejects_download(db_session: Session) -> None:
 
     member = _client_with_access(
         db_session,
-        V3Access(tier="member", is_member=True, membership_expires_at=None, days_remaining=None),
+        _full_member_access(),
     )
     res = member.get("/api/blog/attachments/video-no-dl/file?download=true")
     assert res.status_code == 404
 
+
+def test_trial_member_sees_fifty_percent_with_locked_items(db_session: Session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BLOG_UPLOAD_DIR", str(tmp_path))
+    now = dt.datetime.now(dt.timezone.utc)
+    store_pdf = __import__("app.services.blog_storage", fromlist=["store_pdf"]).store_pdf
+
+    for index in range(10):
+        stored_name, _ = store_pdf(
+            content=f"%PDF-1.4\n% trial {index}\n".encode(),
+            original_filename=f"trial-{index:02d}.pdf",
+        )
+        db_session.add(
+            BlogAttachmentRow(
+                id=f"trial-doc-{index}",
+                stored_name=stored_name,
+                original_filename=f"trial-{index:02d}.pdf",
+                mime_type="application/pdf",
+                file_size=32,
+                title_zh=f"试用 {index}",
+                category="course",
+                is_sample=False,
+                created_at=now - dt.timedelta(days=index),
+            )
+        )
+    db_session.commit()
+
+    trial = _client_with_access(db_session, _trial_member_access())
+    res = trial.get("/api/blog/documents")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["total"] == 10
+    assert payload["access"]["is_trial_member"] is True
+    assert payload["access"]["is_full_member"] is False
+    assert payload["access"]["trial_teaser_count"] == 5
+    locked = [item for item in payload["items"] if item["is_locked"]]
+    unlocked = [item for item in payload["items"] if not item["is_locked"]]
+    assert len(unlocked) == 5
+    assert len(locked) == 5
+
+    allowed_id = unlocked[0]["id"]
+    locked_id = locked[0]["id"]
+    assert trial.get(f"/api/blog/attachments/{allowed_id}/file").status_code == 200
+    denied = trial.get(f"/api/blog/attachments/{locked_id}/file")
+    assert denied.status_code == 403
+    denied_body = denied.json()
+    error_code = denied_body.get("error", {}).get("code")
+    if error_code is None and isinstance(denied_body.get("detail"), dict):
+        error_code = denied_body["detail"].get("code")
+    assert error_code == "membership_upgrade_required"

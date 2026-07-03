@@ -215,8 +215,8 @@ class RedeemCodeResponse(BaseModel):
     membership_expires_at: datetime
 
 
-def _to_public(row: UserRow) -> UserPublic:
-    access = resolve_v3_access(row)
+def _to_public(row: UserRow, *, session: Session | None = None) -> UserPublic:
+    access = resolve_v3_access(row, session=session)
     return UserPublic(
         id=row.id,
         email=row.email,
@@ -763,8 +763,11 @@ async def login(
 
 
 @router.get("/me", response_model=UserPublic)
-async def me(user: Annotated[UserRow, Depends(get_current_user)]) -> UserPublic:
-    return _to_public(user)
+async def me(
+    user: Annotated[UserRow, Depends(get_current_user)],
+    session: Session = Depends(db_session_dep),
+) -> UserPublic:
+    return _to_public(user, session=session)
 
 
 @router.post("/redeem", response_model=RedeemCodeResponse)
@@ -787,7 +790,7 @@ async def redeem_code(
             detail={"code": "membership_missing", "message": "会员状态更新失败。"},
         )
     return RedeemCodeResponse(
-        user=_to_public(updated),
+        user=_to_public(updated, session=session),
         membership_expires_at=expires,
     )
 

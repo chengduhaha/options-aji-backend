@@ -59,12 +59,30 @@ def _migrate_user_membership_column() -> None:
         logger.info("Added column users.membership_expires_at")
 
 
+def _migrate_user_membership_kind_column() -> None:
+    """Add membership_kind to users table (idempotent)."""
+    insp = inspect(engine)
+    if "users" not in insp.get_table_names():
+        return
+    existing = {c["name"] for c in insp.get_columns("users")}
+    if "membership_kind" in existing:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "sqlite":
+            conn.execute(text("ALTER TABLE users ADD COLUMN membership_kind VARCHAR(16)"))
+        else:
+            conn.execute(text("ALTER TABLE users ADD COLUMN membership_kind VARCHAR(16)"))
+        logger.info("Added column users.membership_kind")
+
+
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to call multiple times."""
     logger.info("Initializing database tables...")
     Base.metadata.create_all(bind=engine)
     _migrate_options_snapshot_columns()
     _migrate_user_membership_column()
+    _migrate_user_membership_kind_column()
     session = SessionLocal()
     try:
         seed_nav_settings(session)

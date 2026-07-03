@@ -157,6 +157,11 @@ def redeem_activation_code(
     locked_user.membership_expires_at = (
         new_expires if new_expires.tzinfo else new_expires.replace(tzinfo=timezone.utc)
     )
+    if row.duration_tier == "7D":
+        if (locked_user.membership_kind or "").strip().lower() != "full":
+            locked_user.membership_kind = "trial"
+    else:
+        locked_user.membership_kind = "full"
     session.add(row)
     session.add(locked_user)
     session.commit()

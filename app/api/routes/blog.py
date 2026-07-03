@@ -35,7 +35,7 @@ from app.services.blog_thumbnail import (
     thumbnail_etag,
     thumbnail_mime_type,
 )
-from app.services.membership import V3Access, membership_public_fields
+from app.services.membership import V3Access, blog_access_cache_tier, membership_public_fields
 from app.services.cache_service import (
     cache_delete_pattern,
     cache_get,
@@ -88,6 +88,7 @@ class BlogAttachmentPublic(BaseModel):
     description_en: Optional[str] = None
     is_sample: bool = True
     is_preview: bool = False
+    is_locked: bool = False
     media_kind: str = "document"
     post_id: Optional[str] = None
     download_url: str
@@ -262,6 +263,7 @@ def _thumbnail_url(attachment: BlogAttachmentRow) -> Optional[str]:
 
 
 _GUEST_TEASER_FRACTION = 0.3
+_TRIAL_TEASER_FRACTION = 0.5
 _DEFAULT_DOCUMENT_PAGE_SIZE = 20
 
 
@@ -333,6 +335,7 @@ def _to_attachment_public(
     attachment: BlogAttachmentRow,
     *,
     is_preview: bool = False,
+    is_locked: bool = False,
 ) -> BlogAttachmentPublic:
     download_url, view_url = _attachment_urls(attachment)
     return BlogAttachmentPublic(
@@ -347,6 +350,7 @@ def _to_attachment_public(
         description_en=attachment.description_en,
         is_sample=attachment.is_sample,
         is_preview=is_preview,
+        is_locked=is_locked,
         media_kind=attachment.media_kind or "document",
         post_id=attachment.post_id,
         download_url=download_url,
@@ -357,13 +361,14 @@ def _to_attachment_public(
     )
 
 
-def _guest_teaser_ids(
+def _teaser_ids_for_fraction(
     session: Session,
     *,
+    fraction: float,
     category: Optional[str] = None,
     media_kind: str = "document",
 ) -> set[str]:
-    """Newest ceil(30%) of standalone items per category visible to guests."""
+    """Newest ceil(fraction) of standalone items per category."""
     rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind)
     by_category: dict[str, list[BlogAttachmentRow]] = defaultdict(list)
     for row in rows:
@@ -371,10 +376,38 @@ def _guest_teaser_ids(
 
     visible: set[str] = set()
     for cat_rows in by_category.values():
-        take = max(1, math.ceil(len(cat_rows) * _GUEST_TEASER_FRACTION))
+        take = max(1, math.ceil(len(cat_rows) * fraction))
         for row in cat_rows[:take]:
             visible.add(row.id)
     return visible
+
+
+def _guest_teaser_ids(
+    session: Session,
+    *,
+    category: Optional[str] = None,
+    media_kind: str = "document",
+) -> set[str]:
+    return _teaser_ids_for_fraction(
+        session,
+        fraction=_GUEST_TEASER_FRACTION,
+        category=category,
+        media_kind=media_kind,
+    )
+
+
+def _trial_teaser_ids(
+    session: Session,
+    *,
+    category: Optional[str] = None,
+    media_kind: str = "document",
+) -> set[str]:
+    return _teaser_ids_for_fraction(
+        session,
+        fraction=_TRIAL_TEASER_FRACTION,
+        category=category,
+        media_kind=media_kind,
+    )
 
 
 def _document_category_breakdown(
@@ -413,12 +446,19 @@ def _document_access_fields(
     fields = membership_public_fields(access)
     member_total = len(_fetch_standalone_documents(session, category=category, media_kind=media_kind))
     guest_teaser_count = len(_guest_teaser_ids(session, category=category, media_kind=media_kind))
-    visible_count = member_total if access.is_member else guest_teaser_count
+    trial_teaser_count = len(_trial_teaser_ids(session, category=category, media_kind=media_kind))
+    if access.is_full_member:
+        visible_count = member_total
+    elif access.is_trial_member:
+        visible_count = trial_teaser_count
+    else:
+        visible_count = guest_teaser_count
     fields.update(
         {
             "visible_count": visible_count,
             "member_total_count": member_total,
             "guest_teaser_count": guest_teaser_count,
+            "trial_teaser_count": trial_teaser_count,
             "category_breakdown": (
                 _document_category_breakdown(session, media_kind=media_kind) if category is None else []
             ),
@@ -439,14 +479,39 @@ def _attachment_is_public(
     access: Optional[V3Access] = None,
 ) -> bool:
     if attachment.post_id is None:
-        if admin is not None or bool(access and access.is_member):
+        if admin is not None:
+            return True
+        if access is not None and access.is_full_member:
             return True
         media_kind = attachment.media_kind or "document"
+        if access is not None and access.is_trial_member:
+            return attachment.id in _trial_teaser_ids(session, media_kind=media_kind)
         return attachment.id in _guest_teaser_ids(session, media_kind=media_kind)
     post = session.get(BlogPostRow, attachment.post_id)
     if post is None:
         return admin is not None
     return post.status == "published" or admin is not None
+
+
+def _enforce_attachment_access(
+    attachment: BlogAttachmentRow,
+    session: Session,
+    admin: Optional[UserRow],
+    access: V3Access,
+    *,
+    not_found_message: str,
+) -> None:
+    if _attachment_is_public(attachment, session, admin, access):
+        return
+    if access.is_trial_member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "membership_upgrade_required",
+                "message": "该内容需升级至月/年会员后访问。",
+            },
+        )
+    raise HTTPException(status_code=404, detail={"code": "not_found", "message": not_found_message})
 
 
 def _video_r2_key(attachment: BlogAttachmentRow) -> str:
@@ -500,20 +565,23 @@ def _list_standalone_media(
     media_kind: str,
     sort: str = "newest",
 ) -> BlogDocumentListResponse:
-    if access.is_member:
-        rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind, sort=sort)
-        page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
+    all_rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind, sort=sort)
+    if access.is_full_member:
+        page_rows, total = _paginate_documents(all_rows, page=page, page_size=page_size)
         items = [_to_attachment_public(r) for r in page_rows]
+    elif access.is_trial_member:
+        allowed_ids = _trial_teaser_ids(session, category=category, media_kind=media_kind)
+        page_rows, total = _paginate_documents(all_rows, page=page, page_size=page_size)
+        items = [
+            _to_attachment_public(r, is_locked=r.id not in allowed_ids)
+            for r in page_rows
+        ]
     else:
         teaser_ids = _guest_teaser_ids(session, category=category, media_kind=media_kind)
         if not teaser_ids:
-            rows = []
+            rows: list[BlogAttachmentRow] = []
         else:
-            rows = [
-                row
-                for row in _fetch_standalone_documents(session, category=category, media_kind=media_kind, sort=sort)
-                if row.id in teaser_ids
-            ]
+            rows = [row for row in all_rows if row.id in teaser_ids]
         page_rows, total = _paginate_documents(rows, page=page, page_size=page_size)
         items = [_to_attachment_public(r, is_preview=True) for r in page_rows]
 
@@ -535,10 +603,14 @@ def _get_standalone_course(
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None or row.post_id is not None or row.media_kind != "video":
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+    if access.is_full_member:
+        return _to_attachment_public(row)
+    if access.is_trial_member:
+        allowed_ids = _trial_teaser_ids(session, media_kind="video")
+        return _to_attachment_public(row, is_locked=row.id not in allowed_ids)
     if not _attachment_is_public(row, session, None, access):
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
-    is_preview = not access.is_member
-    return _to_attachment_public(row, is_preview=is_preview)
+    return _to_attachment_public(row, is_preview=True)
 
 
 def _normalize_content_format(raw: str | None) -> str:
@@ -710,7 +782,13 @@ def download_blog_attachment(
             detail={"code": "not_found", "message": "请使用视频播放接口。"},
         )
     if not _attachment_is_public(row, session, admin, access):
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "附件不存在。"})
+        _enforce_attachment_access(
+            row,
+            session,
+            admin,
+            access,
+            not_found_message="附件不存在。",
+        )
 
     try:
         path = resolve_pdf_path(row.stored_name)
@@ -735,10 +813,10 @@ def list_blog_documents(
     page_size: int = Query(_DEFAULT_DOCUMENT_PAGE_SIZE, ge=1, le=100),
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
-    """Standalone PDF documents: ~30% teaser per category for guests, full archive for members."""
+    """Standalone PDF documents: ~30% teaser per category for guests, 50% for trial, full for paid."""
     category_key = category.strip() if category else ""
     cache_key = key_blog_documents(
-        is_member=access.is_member,
+        access_tier=blog_access_cache_tier(access),
         page=page,
         page_size=page_size,
         category=category_key,
@@ -771,10 +849,10 @@ def list_blog_courses(
     sort: str = Query(default="newest", pattern="^(newest|oldest)$"),
     access: V3Access = Depends(get_v3_access),
 ) -> BlogDocumentListResponse:
-    """Standalone course videos: ~30% teaser per category for guests, full library for members."""
+    """Standalone course videos: ~30% teaser for guests, 50% for trial, full for paid."""
     category_key = category.strip() if category else ""
     cache_key = key_blog_courses(
-        is_member=access.is_member,
+        access_tier=blog_access_cache_tier(access),
         page=page,
         page_size=page_size,
         category=category_key,
@@ -827,10 +905,16 @@ def create_blog_play_token(
             detail={"code": "storage_unavailable", "message": "视频存储未配置。"},
         )
 
-    is_member = admin is not None or access.is_member
-    preview = not is_member
-    if preview and not _attachment_is_public(row, session, admin, access):
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+    is_full = admin is not None or access.is_full_member
+    preview = not is_full and not access.is_trial_member
+    if not _attachment_is_public(row, session, admin, access):
+        _enforce_attachment_access(
+            row,
+            session,
+            admin,
+            access,
+            not_found_message="视频不存在。",
+        )
 
     token, expires_at = create_play_token(attachment_id=row.id, preview=preview)
     cfg = get_settings()

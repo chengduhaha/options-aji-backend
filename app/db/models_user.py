@@ -36,6 +36,8 @@ class UserRow(Base):
         nullable=True,
         index=True,
     )
+    #: trial = 7-day activation code (50% blog access); full = paid or 30D/365D codes.
+    membership_kind: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
 
 
 class ActivationCodeRow(Base):

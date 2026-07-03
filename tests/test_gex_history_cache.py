@@ -11,6 +11,9 @@ from app.services.membership import V3Access
 FREE_ACCESS = V3Access(
     tier="free",
     is_member=False,
+    is_full_member=False,
+    is_trial_member=False,
+    membership_kind=None,
     membership_expires_at=None,
     days_remaining=None,
 )

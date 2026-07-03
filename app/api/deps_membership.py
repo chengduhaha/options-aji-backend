@@ -36,5 +36,6 @@ async def get_optional_user(
 
 async def get_v3_access(
     user: Annotated[UserRow | None, Depends(get_optional_user)],
+    session: Session = Depends(db_session_dep),
 ) -> V3Access:
-    return resolve_v3_access(user)
+    return resolve_v3_access(user, session=session)

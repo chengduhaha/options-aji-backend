@@ -213,22 +213,20 @@ def key_blog_post_slug(slug: str) -> str:
 
 def key_blog_courses(
     *,
-    is_member: bool,
+    access_tier: str,
     page: int,
     page_size: int,
     category: str,
     sort: str,
 ) -> str:
-    tier = "member" if is_member else "guest"
-    return f"blog:courses:{tier}:{page}:{page_size}:{category or '_all_'}:{sort}"
+    return f"blog:courses:{access_tier}:{page}:{page_size}:{category or '_all_'}:{sort}"
 
 
 def key_blog_documents(
     *,
-    is_member: bool,
+    access_tier: str,
     page: int,
     page_size: int,
     category: str,
 ) -> str:
-    tier = "member" if is_member else "guest"
-    return f"blog:documents:{tier}:{page}:{page_size}:{category or '_all_'}"
+    return f"blog:documents:{access_tier}:{page}:{page_size}:{category or '_all_'}"

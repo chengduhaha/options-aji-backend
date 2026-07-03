@@ -117,6 +117,9 @@ def test_generate_and_redeem_code(monkeypatch) -> None:
     assert redeem.status_code == 200, redeem.text
     body = redeem.json()
     assert body["user"]["membership"]["is_member"] is True
+    assert body["user"]["membership"]["membership_kind"] == "trial"
+    assert body["user"]["membership"]["is_trial_member"] is True
+    assert body["user"]["membership"]["is_full_member"] is False
     assert body["membership_expires_at"]
 
     dup = client.post(
@@ -165,6 +168,7 @@ def test_stack_renewal_extends_from_current_expiry(monkeypatch) -> None:
             client_ip="127.0.0.1",
         )
         assert updated.membership_expires_at is not None
+        assert updated.membership_kind == "full"
         expires = _as_aware(updated.membership_expires_at)
         assert expires is not None
         remaining = expires - datetime.now(timezone.utc)
