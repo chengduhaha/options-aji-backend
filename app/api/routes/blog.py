@@ -447,7 +447,10 @@ def _document_access_fields(
     member_total = len(_fetch_standalone_documents(session, category=category, media_kind=media_kind))
     guest_teaser_count = len(_guest_teaser_ids(session, category=category, media_kind=media_kind))
     trial_teaser_count = len(_trial_teaser_ids(session, category=category, media_kind=media_kind))
-    if access.is_full_member:
+    # Videos: every tier sees all videos (non-full-members get a 3-min preview).
+    if media_kind == "video":
+        visible_count = member_total
+    elif access.is_full_member:
         visible_count = member_total
     elif access.is_trial_member:
         visible_count = trial_teaser_count
@@ -484,6 +487,10 @@ def _attachment_is_public(
         if access is not None and access.is_full_member:
             return True
         media_kind = attachment.media_kind or "document"
+        # Standalone videos are listing-visible to every tier; the 3-minute
+        # preview cap is enforced by the frontend player via the play-token.
+        if media_kind == "video":
+            return True
         if access is not None and access.is_trial_member:
             return attachment.id in _trial_teaser_ids(session, media_kind=media_kind)
         return attachment.id in _guest_teaser_ids(session, media_kind=media_kind)
@@ -566,7 +573,15 @@ def _list_standalone_media(
     sort: str = "newest",
 ) -> BlogDocumentListResponse:
     all_rows = _fetch_standalone_documents(session, category=category, media_kind=media_kind, sort=sort)
-    if access.is_full_member:
+    if media_kind == "video":
+        # Videos: every tier sees ALL videos. Non-full-members get a 3-minute
+        # preview flag so the frontend player truncates playback.
+        page_rows, total = _paginate_documents(all_rows, page=page, page_size=page_size)
+        if access.is_full_member:
+            items = [_to_attachment_public(r) for r in page_rows]
+        else:
+            items = [_to_attachment_public(r, is_preview=True) for r in page_rows]
+    elif access.is_full_member:
         page_rows, total = _paginate_documents(all_rows, page=page, page_size=page_size)
         items = [_to_attachment_public(r) for r in page_rows]
     elif access.is_trial_member:
@@ -603,13 +618,10 @@ def _get_standalone_course(
     row = session.get(BlogAttachmentRow, attachment_id)
     if row is None or row.post_id is not None or row.media_kind != "video":
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
+    # All tiers can open the watch page for every video; non-full-members get
+    # a 3-minute preview flag (the player enforces the time cap).
     if access.is_full_member:
         return _to_attachment_public(row)
-    if access.is_trial_member:
-        allowed_ids = _trial_teaser_ids(session, media_kind="video")
-        return _to_attachment_public(row, is_locked=row.id not in allowed_ids)
-    if not _attachment_is_public(row, session, None, access):
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "视频不存在。"})
     return _to_attachment_public(row, is_preview=True)
 
 
@@ -906,7 +918,9 @@ def create_blog_play_token(
         )
 
     is_full = admin is not None or access.is_full_member
-    preview = not is_full and not access.is_trial_member
+    # Non-full-members (guests AND trial) get a 3-minute preview token; the
+    # frontend player enforces the time cap via preview_seconds.
+    preview = not is_full
     if not _attachment_is_public(row, session, admin, access):
         _enforce_attachment_access(
             row,
