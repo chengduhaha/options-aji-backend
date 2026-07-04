@@ -1,0 +1,262 @@
+<style>
+  .aji-guide{
+    --bg:#f5f2f0; --ink:#151617; --gold:#c9a227; --gold-soft:rgba(201,162,39,.12);
+    --card:#fffdfb; --line:#e7e1d8; --muted:#6f6a63; --soft:#c9c2b6;
+    --bull:#0d7a5f; --bear:#b42318; --neut:#5a5d66;
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.75; font-size:16px; padding:4px;
+  }
+  .aji-guide h2{font-size:22px;margin:0 0 10px;font-weight:700;letter-spacing:.2px}
+  .aji-guide h3{font-size:18px;margin:22px 0 8px;font-weight:700}
+  .aji-guide p{margin:10px 0}
+  .aji-guide .lead{font-size:17px}
+  .aji-guide .accent{color:var(--gold);font-weight:700}
+  .aji-guide .meta{font-size:13.5px;color:var(--muted);margin-bottom:18px}
+  .aji-guide .chart-card,.aji-guide .data-table-wrap{
+    background:var(--card);border:2px solid var(--ink);border-radius:0;
+    padding:18px 20px;margin:18px 0;box-shadow:3px 3px 0 var(--ink);
+  }
+  .aji-guide .chart-note{font-size:13.5px;color:var(--muted);margin:6px 0 14px}
+  .aji-guide canvas{max-width:100%}
+  .aji-guide .data-table{width:100%;border-collapse:collapse;font-size:14px}
+  .aji-guide .data-table th{
+    background:var(--ink);color:#f5f2f0;text-align:left;padding:10px 12px;font-weight:600;
+  }
+  .aji-guide .data-table td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .aji-guide .data-table tr:nth-child(even) td{background:var(--gold-soft)}
+  .aji-guide .tldr{display:grid;gap:12px;margin:14px 0}
+  @media(min-width:640px){.aji-guide .tldr{grid-template-columns:repeat(3,1fr)}}
+  .aji-guide .tldr-card{
+    border:2px solid var(--ink);background:var(--card);padding:14px 16px;
+    box-shadow:2px 2px 0 var(--ink);font-size:14.5px;
+  }
+  .aji-guide .tldr-card strong{display:block;font-size:15px;margin-bottom:6px}
+  .aji-guide details.section{
+    border:2px solid var(--ink);background:var(--card);margin:14px 0;
+    box-shadow:3px 3px 0 var(--ink);
+  }
+  .aji-guide details.section>summary{
+    cursor:pointer;padding:14px 18px;font-weight:700;list-style:none;
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+  }
+  .aji-guide details.section>summary::-webkit-details-marker{display:none}
+  .aji-guide details.section>summary::after{content:"+";font-size:20px;color:var(--gold)}
+  .aji-guide details.section[open]>summary::after{content:"−"}
+  .aji-guide .section-body{padding:0 18px 16px;border-top:1px solid var(--line)}
+  .aji-guide .tab-nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+  .aji-guide .tab-btn{
+    border:2px solid var(--ink);background:var(--card);padding:6px 12px;
+    font-size:13px;font-weight:700;cursor:pointer;
+  }
+  .aji-guide .tab-btn.active{background:var(--gold);color:#fff}
+  .aji-guide .tab-panel{display:none}
+  .aji-guide .tab-panel.active{display:block}
+  .aji-guide .stock-grid{display:grid;gap:12px}
+  @media(min-width:700px){.aji-guide .stock-grid{grid-template-columns:repeat(2,1fr)}}
+  .aji-guide .stock-card{
+    border:2px solid var(--ink);background:#fff;padding:12px 14px;
+    box-shadow:2px 2px 0 var(--ink);font-size:14px;
+  }
+  .aji-guide .stock-card h4{margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .aji-guide .badge{
+    display:inline-block;font-size:11px;font-weight:800;padding:2px 8px;
+    border:1px solid var(--ink);text-transform:uppercase;letter-spacing:.3px;
+  }
+  .aji-guide .badge-bull{background:#d1fae5;color:var(--bull)}
+  .aji-guide .badge-bear{background:#fee2e2;color:var(--bear)}
+  .aji-guide .badge-neut{background:#f3f4f6;color:var(--neut)}
+  .aji-guide .checklist{list-style:none;padding:0;margin:10px 0}
+  .aji-guide .checklist li{
+    padding:10px 12px;margin:8px 0;border-left:4px solid var(--gold);
+    background:rgba(201,162,39,.07);font-size:14.5px;
+  }
+  .aji-guide .disclaimer{
+    font-size:12.5px;color:var(--muted);margin-top:26px;padding-top:14px;
+    border-top:2px solid var(--line);
+  }
+</style>
+
+<div class="aji-guide">
+  <h2>0DTE与热门正股暗流情报日报</h2>
+  <p class="meta">2026年7月2日（周四）· 美东收盘核实 16:30 · 阿吉生财有道</p>
+  <p class="lead">非农爆冷、芯片暴力去杠杆、特斯拉「利好出尽」——三个事件重塑了今日 0DTE 与暗池结构。下文用<span class="accent">可扫读的数据卡片</span>提炼机构动向与周一盯盘清单。</p>
+
+  <h3>🔥 30 秒 TL;DR</h3>
+  <div class="tldr">
+    <div class="tldr-card"><strong>① 非农断崖式爆冷</strong>6 月仅增 5.7 万人（预期 11 万），前两月下修 7.4 万。加息即时警报消退，大盘下方政策预期垫加厚。</div>
+    <div class="tldr-card"><strong>② 芯片因子暴力去杠杆</strong>KLAC −11.7%、LRCX/SNDK −10%+，纳指 −1.61%；资金旋转至道指防御股，道指创历史新高。</div>
+    <div class="tldr-card"><strong>③ TSLA Sell the News</strong>Q2 交付 48 万辆超预期，但股价 −6%。追高 Call 遭遇 IV 崩溃 + 股价倒戈双杀。</div>
+  </div>
+
+  <h3>🎯 今日 0DTE 关键数据</h3>
+  <div class="data-table-wrap">
+    <table class="data-table">
+      <thead><tr><th>指标</th><th>数值</th><th>结构解读</th></tr></thead>
+      <tbody>
+        <tr><td>SPY Gamma Flip</td><td><b>$741.22</b>（收 $744.78）</td><td>正 Gamma 区——做市商偏稳定器，买低卖高抑制波动</td></tr>
+        <tr><td>QQQ Gamma Flip</td><td><b>$711.35</b>（收 $712.60）</td><td>逼近临界点；失守则转负 Gamma，对冲盘或助跌</td></tr>
+        <tr><td>SPX 最大 OI（Pin）</td><td><b>7500</b>（7/2 到期）</td><td>收盘前半小时锚定在 7500 下方 Delta 再平衡</td></tr>
+        <tr><td>0DTE 成交占比</td><td><b>53.5%</b></td><td>独立日长周末 + 非农，尾盘 Theta 衰退极剧烈</td></tr>
+        <tr><td>VIX</td><td><b>16.15</b>（−2.65%）</td><td>非农 Vol Crush；远端 CPI 对冲成本仍偏高</td></tr>
+        <tr><td>Equity P/C Ratio</td><td><b>0.69</b></td><td>中性偏多；半导体惨跌但未引发恐慌性 Put 狂潮</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="chart-card">
+    <h2 style="font-size:18px;margin:0 0 6px">VIX 近 5 日走势</h2>
+    <p class="chart-note">非农公布后短期波动率坍塌；7/14 CPI 前远端对冲仍贵。</p>
+    <canvas id="ajiVixChart" width="640" height="240" aria-label="VIX chart"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <h2 style="font-size:18px;margin:0 0 6px">板块轮动：纳指 vs 道指（7/2）</h2>
+    <p class="chart-note">芯片去杠杆日——资金从成长旋转至防御。</p>
+    <canvas id="ajiSectorChart" width="640" height="260" aria-label="Sector rotation"></canvas>
+  </div>
+
+  <details class="section" open>
+    <summary>🐋 聪明钱异动</summary>
+    <div class="section-body">
+      <p><b>QQQ $720 Put（7/17 到期）</b> — 单日成交约 <span class="accent">17,000 张</span>，名义约 3,099 万美元，Ask 侧成交、Vol ≫ OI。机构在非农反弹后于 $720 上方构建看跌防御。</p>
+      <p><b>MSFT $480 Call（7/2 到期）</b> — 6 月初 940 万美元 Sweep 押注今日到期大考；现货 $384，天量看涨期权<span class="accent">价值归零</span>。25 亿美元 Frontier AI 投资未能对冲半导体系统性抛压。</p>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>📡 暗池雷达</summary>
+    <div class="section-body">
+      <p><b>SPY @ $617.49</b> — 暗池成交约 <span class="accent">403,000 股</span>（约 2.49 亿美元）。该区间与中期技术支撑共振，代表长线机构核心建仓成本区；现价 $744 上方，中期牛市结构未实质动摇。</p>
+    </div>
+  </details>
+
+  <h3>📈 热门正股速览（10 只）</h3>
+  <div class="tab-nav" id="ajiStockTabs">
+    <button type="button" class="tab-btn active" data-tab="tech">科技 / 半导体</button>
+    <button type="button" class="tab-btn" data-tab="meme">Meme / 情绪</button>
+    <button type="button" class="tab-btn" data-tab="defense">防御 / 其他</button>
+  </div>
+
+  <div class="tab-panel active" data-panel="tech">
+    <div class="stock-grid">
+      <div class="stock-card"><h4>PLTR <span class="badge badge-bull">看多</span> ▲4.03%</h4><p>Davidson 上调至买入；逆势收复 20 日线，AI 国防订单成资金避风港。</p></div>
+      <div class="stock-card"><h4>TSLA <span class="badge badge-bear">看空</span> ▼6.00%</h4><p>交付超预期却「利好出尽」；降价侵蚀毛利率，追高 Call 双杀。</p></div>
+      <div class="stock-card"><h4>KLAC <span class="badge badge-bear">强烈看空</span> ▼11.77%</h4><p>高β因子去杠杆误伤；Vol 暴增 545%，IV 飙至 97.6%，技术形态破位。</p></div>
+      <div class="stock-card"><h4>MSFT <span class="badge badge-bull">看多待确认</span> ▲0.46%</h4><p>缩量横盘抗跌；$25B Frontier AI 投资，但 $480 Call 归零显示远端押注失败。</p></div>
+      <div class="stock-card"><h4>MU <span class="badge badge-neut">观望</span> ▼5.50%</h4><p>两日跌超 15%；Capital World 等巨头 Q1 已大幅减仓，反弹夭折。</p></div>
+      <div class="stock-card"><h4>LRCX <span class="badge badge-bear">看空</span> ▼10.20%</h4><p>94% 收入来自海外；关税不确定性 + 机构 Bearish Iron Butterfly 对冲阵列。</p></div>
+      <div class="stock-card"><h4>META <span class="badge badge-neut">观望</span> ▼3.48%</h4><p>期权资金净流出约 8,300 万美元；自建云平台或推高 CapEx，大涨后转防御。</p></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" data-panel="meme">
+    <div class="stock-grid">
+      <div class="stock-card"><h4>GME <span class="badge badge-bear">强烈看空</span> ▼2.50%</h4><p>91% 成交量发生在暗池；散户买盘被内部化吸收，定价权在机构。</p></div>
+      <div class="stock-card"><h4>CHWY <span class="badge badge-bear">看空</span></h4><p>Keith Gill 13G 披露 6.6% 持仓；流通盘 4× GME，轧空结构不成立，IV 三位数。</p></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" data-panel="defense">
+    <div class="stock-grid">
+      <div class="stock-card"><h4>AVAV <span class="badge badge-bull">看多</span> ▲5.50%</h4><p>斩获陆军 5 亿美元反无人机合同；DaaS 毛利率 45%+，国防资金逆势流入。</p></div>
+    </div>
+  </div>
+
+  <details class="section">
+    <summary>🧨 空头挤预警</summary>
+    <div class="section-body">
+      <table class="data-table">
+        <thead><tr><th>标的</th><th>空头比例</th><th>借券成本</th><th>DTC</th><th>逻辑</th></tr></thead>
+        <tbody>
+          <tr><td>LCID</td><td>47.98%</td><td>攀升</td><td>4.26 天</td><td>空头 +13.7%；若 EV 板块借 TSLA 数据共振反弹，平仓或引发踩踏</td></tr>
+          <tr><td>RXRX</td><td>36.75%</td><td>异常</td><td>8.36 天</td><td>1.84 亿空头股 + Call OI 异动；临床利好或触发 8 天回补真空</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>📅 催化剂日历（未来 5 个交易日）</summary>
+    <div class="section-body">
+      <table class="data-table">
+        <thead><tr><th>日期</th><th>事件</th><th>影响标的</th><th>要点</th></tr></thead>
+        <tbody>
+          <tr><td>7/6 周一</td><td>独立日后首个交易日</td><td>SPY / QQQ / SPX</td><td>长周末消息集中定价；开盘 30 分钟 Theta 陷阱</td></tr>
+          <tr><td>7/8 周三</td><td>VIX 期权到期</td><td>VIX / VXX</td><td>展期后 16 关口 Gamma 锚定消失，波动率或单边突围</td></tr>
+          <tr><td>7/10 周五</td><td>异常 Call 集中到期</td><td>SIRI / KHC</td><td>$31C / $26C 天量押注到期，尾盘 Delta 再平衡风险</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>🌐 宏观 × 期权影响</summary>
+    <div class="section-body">
+      <p>非农后 7 月加息定价从 <b>40bps → 28bps</b> 坍塌，科技股估值压制暂缓。但 <span class="accent">7/14 核心 CPI</span> 仍是 binary 事件。</p>
+      <p>市场呈现「短期 Vol Crush + 远端对冲偏贵」断层。SPX 7500 Call Wall 压制上方，$741 Gamma Flip 托底——CPI 前或锁在 <b>7380–7520</b> 箱体。策略思路：非农后 IV 回落尾声，可考虑 SPX/SPY 宽跨式或铁鹰收 Theta（非建议，仅供研究框架）。</p>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>😈 WSB 情绪反向指标</summary>
+    <div class="section-body">
+      <p>热议飙升：<b>GME</b>（+350%）、<b>TSLA</b>（+210%）、<b>CHWY</b>（+180%）、<b>PLTR</b>（+120%）。散户在芯片低位割肉追 Meme、在 TSLA 交付利好追高 Call——典型对手盘信号。</p>
+      <p>P/C 0.69 仍偏麻木乐观，但 breadth 维持买入区：大盘无系统性杀跌危险，散户情绪撕裂反而为机构提供流动性。</p>
+    </div>
+  </details>
+
+  <h3>⚡ 周一盯盘清单</h3>
+  <ul class="checklist">
+    <li><b>09:30</b> — QQQ 能否守稳 $710–711；KLAC/AMAT/LRCX 净卖出若萎缩 60%+，芯片清仓或告一段落。</li>
+    <li><b>10:00</b> — SPY $741.22 Gamma Flip：跌破则做市商机械砸盘，日内下行波动率指数级放大。</li>
+    <li><b>全天</b> — SEC Form 4：长周末管理层增持窗口；关注 Hartree 是否继续扫货 HDSN（近 3 日已买 447 万美元）。</li>
+  </ul>
+
+  <p class="disclaimer">本平台仅提供数据分析和教育内容，不构成投资建议。美股与期权交易具有极高风险，可能面临本金亏损。数据基于 2026-07-02 收盘，延迟约 15 分钟。© OptionsAji · 阿吉生财有道</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  if (typeof Chart === 'undefined') return;
+  var GOLD = '#c9a227', INK = '#151617', BEAR = '#b42318', BULL = '#0d7a5f';
+
+  var vix = document.getElementById('ajiVixChart');
+  if (vix) {
+    new Chart(vix, {
+      type: 'line',
+      data: {
+        labels: ['6/26', '6/27', '6/30', '7/1', '7/2'],
+        datasets: [{ label: 'VIX', data: [17.8, 17.2, 16.9, 16.6, 16.15], borderColor: GOLD, backgroundColor: 'rgba(201,162,39,.15)', fill: true, tension: 0.35 }]
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: false, min: 15 } } }
+    });
+  }
+
+  var sector = document.getElementById('ajiSectorChart');
+  if (sector) {
+    new Chart(sector, {
+      type: 'bar',
+      data: {
+        labels: ['QQQ', 'SPY', 'DIA', 'SMH'],
+        datasets: [{ label: '日涨跌 %', data: [-1.61, -0.35, 1.35, -4.2], backgroundColor: [-1.61, -0.35, 1.35, -4.2].map(function (v) { return v >= 0 ? BULL : BEAR; }), borderRadius: 4 }]
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { callback: function (v) { return v + '%'; } } } } }
+    });
+  }
+
+  var nav = document.getElementById('ajiStockTabs');
+  if (nav) {
+    nav.addEventListener('click', function (e) {
+      var btn = e.target.closest('.tab-btn');
+      if (!btn) return;
+      var tab = btn.getAttribute('data-tab');
+      nav.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.toggle('active', b === btn); });
+      document.querySelectorAll('.aji-guide .tab-panel').forEach(function (p) {
+        p.classList.toggle('active', p.getAttribute('data-panel') === tab);
+      });
+    });
+  }
+})();
+</script>
