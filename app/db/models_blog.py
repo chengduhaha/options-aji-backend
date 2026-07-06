@@ -36,6 +36,7 @@ class BlogPostRow(Base):
     category: Mapped[str] = mapped_column(String(64), nullable=False, default="general")
     tags: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+    members_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by_user_id: Mapped[Optional[str]] = mapped_column(
         String(36),

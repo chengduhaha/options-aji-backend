@@ -207,8 +207,8 @@ def key_blog_posts(*, page: int, page_size: int, category: str) -> str:
     return f"blog:posts:{page}:{page_size}:{category or '_all_'}"
 
 
-def key_blog_post_slug(slug: str) -> str:
-    return f"blog:post:{slug.strip().lower()}"
+def key_blog_post_slug(slug: str, *, access_tier: str = "public") -> str:
+    return f"blog:post:{slug.strip().lower()}:{access_tier}"
 
 
 def key_blog_courses(

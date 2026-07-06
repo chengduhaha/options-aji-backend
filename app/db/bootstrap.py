@@ -76,6 +76,29 @@ def _migrate_user_membership_kind_column() -> None:
         logger.info("Added column users.membership_kind")
 
 
+def _migrate_blog_members_only_column() -> None:
+    """Add members_only to blog_posts table (idempotent)."""
+    insp = inspect(engine)
+    if "blog_posts" not in insp.get_table_names():
+        return
+    existing = {c["name"] for c in insp.get_columns("blog_posts")}
+    if "members_only" in existing:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "sqlite":
+            conn.execute(
+                text("ALTER TABLE blog_posts ADD COLUMN members_only BOOLEAN NOT NULL DEFAULT 0")
+            )
+        else:
+            conn.execute(
+                text(
+                    "ALTER TABLE blog_posts ADD COLUMN members_only BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+        logger.info("Added column blog_posts.members_only")
+
+
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to call multiple times."""
     logger.info("Initializing database tables...")
@@ -83,6 +106,7 @@ def init_db() -> None:
     _migrate_options_snapshot_columns()
     _migrate_user_membership_column()
     _migrate_user_membership_kind_column()
+    _migrate_blog_members_only_column()
     session = SessionLocal()
     try:
         seed_nav_settings(session)

@@ -21,6 +21,7 @@ from app.api.deps_membership import get_v3_access
 from app.db.models_blog import BlogAttachmentRow, BlogPostRow
 from app.db.models_user import UserRow
 from app.db.session import db_session_dep
+from app.services.blog_content_truncation import truncate_blog_content
 from app.services.blog_document_sort import sort_documents
 from app.services.blog_play_token import create_play_token, decode_play_token
 from app.services.blog_storage import BlogStorageError, delete_pdf, resolve_pdf_path, store_pdf
@@ -127,6 +128,7 @@ class BlogPostSummary(BaseModel):
     category: str
     tags: list[str] = Field(default_factory=list)
     status: str
+    members_only: bool = False
     published_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     attachment_count: int = 0
@@ -136,6 +138,8 @@ class BlogPostDetail(BlogPostSummary):
     body_zh: str
     body_en: Optional[str] = None
     attachments: list[BlogAttachmentPublic] = Field(default_factory=list)
+    locked: bool = False
+    preview_ratio: Optional[float] = None
 
 
 class BlogPostListResponse(BaseModel):
@@ -161,6 +165,7 @@ class BlogPostCreateBody(BaseModel):
     category: str = Field(default="general", max_length=64)
     tags: list[str] = Field(default_factory=list)
     status: str = Field(default="draft", pattern="^(draft|published)$")
+    members_only: bool = False
     published_at: Optional[datetime] = None
 
 
@@ -176,6 +181,7 @@ class BlogPostUpdateBody(BaseModel):
     category: Optional[str] = Field(default=None, max_length=64)
     tags: Optional[list[str]] = None
     status: Optional[str] = Field(default=None, pattern="^(draft|published)$")
+    members_only: Optional[bool] = None
     published_at: Optional[datetime] = None
 
 
@@ -647,10 +653,38 @@ def _to_summary(row: BlogPostRow, attachment_count: int = 0) -> BlogPostSummary:
         category=row.category,
         tags=_parse_tags(row.tags),
         status=row.status,
+        members_only=bool(row.members_only),
         published_at=row.published_at,
         updated_at=row.updated_at,
         attachment_count=attachment_count,
     )
+
+
+def _post_detail_cache_tier(row: BlogPostRow, access: V3Access) -> str:
+    if not row.members_only:
+        return "public"
+    if access.is_member:
+        return "member"
+    return "guest"
+
+
+def _apply_members_only_preview(
+    row: BlogPostRow,
+    *,
+    access: V3Access,
+    admin: UserRow | None,
+) -> tuple[str, Optional[str], bool, Optional[float]]:
+    body_zh = row.body_zh
+    body_en = row.body_en
+    if not row.members_only or admin is not None or access.is_member:
+        return body_zh, body_en, False, None
+
+    content_format = row.content_format or "markdown"
+    preview_ratio = 0.5
+    body_zh = truncate_blog_content(body_zh, content_format=content_format, ratio=preview_ratio)
+    if body_en:
+        body_en = truncate_blog_content(body_en, content_format=content_format, ratio=preview_ratio)
+    return body_zh, body_en, True, preview_ratio
 
 
 def _attachment_count_map(session: Session, post_ids: list[str]) -> dict[str, int]:
@@ -738,14 +772,21 @@ def get_blog_post_by_slug(
     response: Response,
     session: Session = Depends(db_session_dep),
     admin: Annotated[Optional[UserRow], Depends(get_optional_admin_user)] = None,
+    access: V3Access = Depends(get_v3_access),
 ) -> BlogPostDetail:
     slug_norm = slug.strip().lower()
+    cache_tier: str | None = None
     if admin is None:
-        cache_key = key_blog_post_slug(slug_norm)
-        cached = cache_get(cache_key)
-        if isinstance(cached, dict):
-            _set_public_cache_headers(response, hit=True)
-            return BlogPostDetail.model_validate(cached)
+        row_for_tier = session.execute(
+            select(BlogPostRow).where(BlogPostRow.slug == slug_norm)
+        ).scalar_one_or_none()
+        if row_for_tier is not None:
+            cache_tier = _post_detail_cache_tier(row_for_tier, access)
+            cache_key = key_blog_post_slug(slug_norm, access_tier=cache_tier)
+            cached = cache_get(cache_key)
+            if isinstance(cached, dict):
+                _set_public_cache_headers(response, hit=True)
+                return BlogPostDetail.model_validate(cached)
 
     row = session.execute(select(BlogPostRow).where(BlogPostRow.slug == slug_norm)).scalar_one_or_none()
     if row is None:
@@ -765,14 +806,25 @@ def get_blog_post_by_slug(
         .all()
     )
     summary = _to_summary(row, len(attachments))
+    body_zh, body_en, locked, preview_ratio = _apply_members_only_preview(
+        row,
+        access=access,
+        admin=admin,
+    )
     payload = BlogPostDetail(
         **summary.model_dump(),
-        body_zh=row.body_zh,
-        body_en=row.body_en,
+        body_zh=body_zh,
+        body_en=body_en,
         attachments=[_to_attachment_public(a) for a in attachments],
+        locked=locked,
+        preview_ratio=preview_ratio,
     )
-    if admin is None and row.status == "published":
-        cache_set(cache_key, payload.model_dump(mode="json"), ttl=_BLOG_REDIS_CACHE_SECONDS)
+    if admin is None and row.status == "published" and cache_tier is not None:
+        cache_set(
+            key_blog_post_slug(slug_norm, access_tier=cache_tier),
+            payload.model_dump(mode="json"),
+            ttl=_BLOG_REDIS_CACHE_SECONDS,
+        )
         _set_public_cache_headers(response, hit=False)
     return payload
 
@@ -1373,6 +1425,7 @@ def create_blog_post(
         category=body.category.strip() or "general",
         tags=_serialize_tags(body.tags),
         status=body.status,
+        members_only=body.members_only,
         published_at=published_at,
         created_by_user_id=admin.id,
     )
@@ -1425,6 +1478,8 @@ def update_blog_post(
         row.status = body.status
         if body.status == "published" and row.published_at is None:
             row.published_at = datetime.now(timezone.utc)
+    if body.members_only is not None:
+        row.members_only = body.members_only
     if body.published_at is not None:
         row.published_at = body.published_at
 

@@ -559,7 +559,7 @@ def test_member_documents_pagination(db_session: Session, tmp_path, monkeypatch)
     assert payload2["items"][0]["id"] == "page-doc-4"
 
 
-def test_list_blog_courses_guest_teaser(db_session: Session) -> None:
+def test_list_blog_courses_guest_sees_all_with_preview(db_session: Session) -> None:
     now = dt.datetime.now(dt.timezone.utc)
     for index in range(4):
         db_session.add(
@@ -586,11 +586,21 @@ def test_list_blog_courses_guest_teaser(db_session: Session) -> None:
     res = guest.get("/api/blog/courses")
     assert res.status_code == 200
     payload = res.json()
-    assert payload["total"] == 2
+    # Non-members now see ALL videos, each flagged as a 3-minute preview.
+    assert payload["total"] == 4
     assert payload["items"][0]["media_kind"] == "video"
-    assert payload["items"][0]["is_preview"] is True
+    assert all(item["is_preview"] for item in payload["items"])
     assert payload["access"]["member_total_count"] == 4
-    assert payload["access"]["guest_teaser_count"] == 2
+    assert payload["access"]["visible_count"] == 4
+
+    trial = _client_with_access(db_session, _trial_member_access())
+    trial_res = trial.get("/api/blog/courses")
+    assert trial_res.status_code == 200
+    trial_payload = trial_res.json()
+    assert trial_payload["total"] == 4
+    # Trial members are also non-full-members: preview flag set, no locked videos.
+    assert all(item["is_preview"] for item in trial_payload["items"])
+    assert not any(item.get("is_locked") for item in trial_payload["items"])
 
 
 def test_blog_courses_sort_and_single_get(db_session: Session) -> None:
@@ -742,7 +752,7 @@ def test_play_token_and_stream_for_member_video(db_session: Session, monkeypatch
     assert b"ftyp" in stream_res.content
 
 
-def test_guest_cannot_play_token_locked_video(db_session: Session, monkeypatch) -> None:
+def test_guest_play_token_returns_preview_for_any_video(db_session: Session, monkeypatch) -> None:
     monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-pytest")
     now = dt.datetime.now(dt.timezone.utc)
     for index in range(4):
@@ -768,12 +778,21 @@ def test_guest_cannot_play_token_locked_video(db_session: Session, monkeypatch) 
         _guest_access(),
     )
     monkeypatch.setattr("app.api.routes.blog.r2_configured", lambda: True)
-    locked = guest.post("/api/blog/attachments/locked-video-3/play-token")
-    assert locked.status_code == 404
-    preview = guest.post("/api/blog/attachments/locked-video-0/play-token")
-    assert preview.status_code == 200
-    assert preview.json()["preview"] is True
-    assert preview.json()["preview_seconds"] == 180
+    # Every video is now previewable by non-members (3-minute cap), including
+    # ones that used to be 404'd as "non-teaser".
+    for index in range(4):
+        res = guest.post(f"/api/blog/attachments/locked-video-{index}/play-token")
+        assert res.status_code == 200, f"video {index}: {res.json()}"
+        body = res.json()
+        assert body["preview"] is True
+        assert body["preview_seconds"] == 180
+
+    # Full members still get full-length playback (preview=False).
+    member = _client_with_access(db_session, _full_member_access())
+    member_res = member.post("/api/blog/attachments/locked-video-3/play-token")
+    assert member_res.status_code == 200
+    assert member_res.json()["preview"] is False
+    assert member_res.json()["preview_seconds"] is None
 
 
 def test_guest_teaser_uses_filename_date_for_newest(db_session: Session, tmp_path, monkeypatch) -> None:
@@ -1134,6 +1153,82 @@ def test_video_file_endpoint_rejects_download(db_session: Session) -> None:
     )
     res = member.get("/api/blog/attachments/video-no-dl/file?download=true")
     assert res.status_code == 404
+
+
+def test_members_only_post_guest_gets_preview(db_session: Session) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    db_session.add(
+        BlogPostRow(
+            id="member-post-1",
+            slug="member-only-article",
+            title_zh="会员专享文",
+            body_zh="第一段内容。\n\n" + ("正文" * 80),
+            category="insights",
+            status="published",
+            members_only=True,
+            published_at=now,
+            created_by_user_id="admin-1",
+        )
+    )
+    db_session.commit()
+
+    guest = _client_with_access(db_session, _guest_access())
+    res = guest.get("/api/blog/posts/member-only-article")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["locked"] is True
+    assert body["preview_ratio"] == 0.5
+    assert body["members_only"] is True
+    assert len(body["body_zh"]) < len("第一段内容。\n\n" + ("正文" * 80))
+
+
+def test_members_only_post_member_gets_full(db_session: Session) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    full_body = "完整会员内容" + ("X" * 200)
+    db_session.add(
+        BlogPostRow(
+            id="member-post-2",
+            slug="member-full-article",
+            title_zh="会员文",
+            body_zh=full_body,
+            category="insights",
+            status="published",
+            members_only=True,
+            published_at=now,
+            created_by_user_id="admin-1",
+        )
+    )
+    db_session.commit()
+
+    member = _client_with_access(db_session, _full_member_access())
+    res = member.get("/api/blog/posts/member-full-article")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["locked"] is False
+    assert body["preview_ratio"] is None
+    assert body["body_zh"] == full_body
+
+
+def test_admin_create_members_only_post(db_session: Session) -> None:
+    client = _admin_client(db_session)
+    create = client.post(
+        "/api/blog/posts",
+        json={
+            "slug": "locked-by-admin",
+            "title_zh": "锁定文",
+            "body_zh": "secret body " * 50,
+            "category": "insights",
+            "status": "published",
+            "members_only": True,
+        },
+    )
+    assert create.status_code == 201
+    assert create.json()["members_only"] is True
+
+    guest = _client_with_access(db_session, _guest_access())
+    preview = guest.get("/api/blog/posts/locked-by-admin")
+    assert preview.status_code == 200
+    assert preview.json()["locked"] is True
 
 
 def test_trial_member_sees_fifty_percent_with_locked_items(db_session: Session, tmp_path, monkeypatch) -> None:
