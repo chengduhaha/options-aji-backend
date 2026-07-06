@@ -1,0 +1,350 @@
+<style>
+  .aji-guide{
+    --bg:#f5f2f0; --ink:#151617; --gold:#c9a227; --gold-soft:rgba(201,162,39,.12);
+    --card:#fffdfb; --line:#e7e1d8; --muted:#6f6a63; --soft:#c9c2b6;
+    --bull:#0d7a5f; --bear:#b42318; --neut:#5a5d66;
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.75; font-size:16px; padding:4px;
+  }
+  .aji-guide h2{font-size:22px;margin:0 0 10px;font-weight:700;letter-spacing:.2px}
+  .aji-guide h3{font-size:18px;margin:22px 0 8px;font-weight:700}
+  .aji-guide h4{font-size:15px;margin:14px 0 6px;font-weight:700}
+  .aji-guide p{margin:10px 0}
+  .aji-guide .lead{font-size:17px}
+  .aji-guide .accent{color:var(--gold);font-weight:700}
+  .aji-guide .meta{font-size:13.5px;color:var(--muted);margin-bottom:18px}
+  .aji-guide .ticker{
+    display:inline;font-family:"JetBrains Mono",ui-monospace,monospace;
+    font-size:.92em;font-weight:700;color:var(--ink);
+    background:var(--gold-soft);padding:1px 6px;border:1px solid var(--gold);
+    border-radius:2px;white-space:nowrap;
+  }
+  .aji-guide .stats-bar{
+    display:grid;gap:10px;margin:16px 0;
+    grid-template-columns:repeat(2,1fr);
+  }
+  @media(min-width:700px){.aji-guide .stats-bar{grid-template-columns:repeat(4,1fr)}}
+  .aji-guide .stat-pill{
+    border:2px solid var(--ink);background:var(--card);padding:12px 14px;
+    box-shadow:2px 2px 0 var(--ink);text-align:center;
+  }
+  .aji-guide .stat-pill .num{font-size:20px;font-weight:800;font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--gold);display:block}
+  .aji-guide .stat-pill .lbl{font-size:12.5px;color:var(--muted);margin-top:4px;display:block}
+  .aji-guide .chart-card,.aji-guide .data-table-wrap{
+    background:var(--card);border:2px solid var(--ink);border-radius:0;
+    padding:18px 20px;margin:18px 0;box-shadow:3px 3px 0 var(--ink);
+  }
+  .aji-guide .chart-note{font-size:13.5px;color:var(--muted);margin:6px 0 14px}
+  .aji-guide canvas{max-width:100%}
+  .aji-guide .data-table{width:100%;border-collapse:collapse;font-size:13.5px}
+  .aji-guide .data-table th{
+    background:var(--ink);color:#f5f2f0;text-align:left;padding:10px 12px;font-weight:600;
+  }
+  .aji-guide .data-table td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .aji-guide .data-table tr:nth-child(even) td{background:var(--gold-soft)}
+  .aji-guide .tldr{display:grid;gap:12px;margin:14px 0}
+  @media(min-width:640px){.aji-guide .tldr{grid-template-columns:repeat(2,1fr)}}
+  @media(min-width:960px){.aji-guide .tldr{grid-template-columns:repeat(4,1fr)}}
+  .aji-guide .tldr-card{
+    border:2px solid var(--ink);background:var(--card);padding:14px 16px;
+    box-shadow:2px 2px 0 var(--ink);font-size:14px;
+  }
+  .aji-guide .tldr-card strong{display:block;font-size:14.5px;margin-bottom:6px;color:var(--gold)}
+  .aji-guide details.section{
+    border:2px solid var(--ink);background:var(--card);margin:14px 0;
+    box-shadow:3px 3px 0 var(--ink);
+  }
+  .aji-guide details.section>summary{
+    cursor:pointer;padding:14px 18px;font-weight:700;list-style:none;
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+  }
+  .aji-guide details.section>summary::-webkit-details-marker{display:none}
+  .aji-guide details.section>summary::after{content:"+";font-size:20px;color:var(--gold)}
+  .aji-guide details.section[open]>summary::after{content:"−"}
+  .aji-guide .section-body{padding:0 18px 16px;border-top:1px solid var(--line)}
+  .aji-guide .tab-nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+  .aji-guide .tab-btn{
+    border:2px solid var(--ink);background:var(--card);padding:6px 12px;
+    font-size:13px;font-weight:700;cursor:pointer;
+  }
+  .aji-guide .tab-btn.active{background:var(--gold);color:#fff}
+  .aji-guide .tab-panel{display:none}
+  .aji-guide .tab-panel.active{display:block}
+  .aji-guide .stock-grid{display:grid;gap:12px}
+  @media(min-width:700px){.aji-guide .stock-grid{grid-template-columns:repeat(2,1fr)}}
+  .aji-guide .stock-card{
+    border:2px solid var(--ink);background:#fff;padding:12px 14px;
+    box-shadow:2px 2px 0 var(--ink);font-size:14px;
+  }
+  .aji-guide .stock-card h4{margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .aji-guide .badge{
+    display:inline-block;font-size:11px;font-weight:800;padding:2px 8px;
+    border:1px solid var(--ink);text-transform:uppercase;letter-spacing:.3px;
+  }
+  .aji-guide .badge-bull{background:#d1fae5;color:var(--bull)}
+  .aji-guide .badge-bear{background:#fee2e2;color:var(--bear)}
+  .aji-guide .badge-neut{background:#f3f4f6;color:var(--neut)}
+  .aji-guide .checklist{list-style:none;padding:0;margin:10px 0}
+  .aji-guide .checklist li{
+    padding:10px 12px;margin:8px 0;border-left:4px solid var(--gold);
+    background:rgba(201,162,39,.07);font-size:14.5px;
+  }
+  .aji-guide .disclaimer{
+    font-size:12.5px;color:var(--muted);margin-top:26px;padding-top:14px;
+    border-top:2px solid var(--line);
+  }
+</style>
+
+<div class="aji-guide">
+  <h2>2026年全球具身智能与人形机器人投资全景报告</h2>
+  <p class="meta">2026年7月 · 基于 SVRC Research《State of Robotics 2026》与 William Blair《Race to Infinite Labor》 · 阿吉生财有道</p>
+  <p class="lead">2026年4月，SVRC 发布行业风向标报告：美国机器人市场规模达 <span class="accent">114亿美元（+29%）</span>，吸纳全球 <span class="accent">52%+</span> 风投，却面临「定义未来 vs 量产落后」的产业悖论。Physical AI 大脑在美国，硬件出货量在中国——供应链脆弱性与 2027 M&A 浪潮正在重塑资本市场映射。</p>
+
+  <h3>🔥 四大投资主线 TL;DR</h3>
+  <div class="tldr">
+    <div class="tldr-card"><strong>① 卖铲人 · 运动控制</strong>避开大脑估值泡沫，深耕 SEA、无框电机、力矩传感器等硬件壁垒。<span class="ticker">$NOVT</span> <span class="ticker">$RRX</span> <span class="ticker">$ROK</span> 无差别向所有整机厂抽佣。</div>
+    <div class="tldr-card"><strong>② 稀土主权溢价</strong>中国控制 60%+ 开采、90%+ 精炼；DFARS 2027 溯源倒逼北美本土闭环。<span class="ticker">$UUUU</span> 基本面最强，<span class="ticker">$MP</span> 大盘配置，<span class="ticker">$USAR</span> 高弹性期权。</div>
+    <div class="tldr-card"><strong>③ 物流 CapEx 转化</strong>GXO 签行业首个 RaaS 合同，FedEx/AMZN 测试人形卸货与搬运。追踪 PoC → 正式运营开支的拐点。</div>
+    <div class="tldr-card"><strong>④ 2027 M&A 整合</strong>六家资金雄厚美国人形公司角逐，SVRC 预测至少 2 起重大洗牌。关注 Big Tech / OEM 收购方与 SPAC 间接敞口。</div>
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-pill"><span class="num">$11.4B</span><span class="lbl">美国机器人市场 2026（+29% YoY）</span></div>
+    <div class="stat-pill"><span class="num">5,500 vs ~150</span><span class="lbl">中国宇树 vs 美国三巨头单年出货</span></div>
+    <div class="stat-pill"><span class="num">$20–30k</span><span class="lbl">BoM 商业化临界点（当前 ~$100k）</span></div>
+    <div class="stat-pill"><span class="num">$1.3–5.4T</span><span class="lbl">美国物理劳动力替代空间（2030s）</span></div>
+  </div>
+
+  <div class="chart-card">
+    <h2 style="font-size:18px;margin:0 0 6px">2025 人形机器人出货量：中美鸿沟</h2>
+    <p class="chart-note">美国三巨头（Figure / Agility / Tesla Optimus）各约 150 台；中国宇树 5,500 台、智元 5,168 台——数量级差异揭示「软件定义大脑 vs 极致工程量产」分歧。</p>
+    <canvas id="ajiShipChart" width="640" height="280" aria-label="Shipment comparison chart"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <h2 style="font-size:18px;margin:0 0 6px">BoM 成本降本轨迹（美元/台）</h2>
+    <p class="chart-note">执行器占整机成本 50%+；William Blair 模型显示必须压至 $20–30k 才能击穿欧美最低工资，实现大规模 RaaS 商业化。</p>
+    <canvas id="ajiBomChart" width="640" height="240" aria-label="BoM cost trajectory"></canvas>
+  </div>
+
+  <h3>⚔️ 中美代表企业对比</h3>
+  <div class="data-table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr><th>维度</th><th>Agility Robotics</th><th>Tesla Optimus</th><th>宇树 Unitree</th><th>优必选 UBTech</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>上市路径</td><td>SPAC <span class="ticker">$CCXI</span> → <span class="ticker">$AGLT</span></td><td><span class="ticker">$TSLA</span> 内部 R&amp;D</td><td>科创板 IPO</td><td>港交所 <span class="ticker">9880.HK</span></td></tr>
+        <tr><td>估值 / 市值</td><td>~$25B（合并前）</td><td>未独立核算</td><td>~$6B（IPO 隐含）</td><td>~$6.98B</td></tr>
+        <tr><td>2025 出货量</td><td>~150 台（9 客户站点）</td><td>~150 台（工厂内测）</td><td><b>5,500 台</b></td><td>1,079 台</td></tr>
+        <tr><td>2025 营收</td><td>无实质营收，RaaS 订阅</td><td>无对外销售</td><td>$2.5B（+335%），净利 $90M</td><td>$278M，亏损收窄</td></tr>
+        <tr><td>单机售价</td><td>Digit v4 BoM $125k</td><td>$50–100k，目标 $20k</td><td>$85k → <b>$25k</b>，毛利率 ~60%</td><td>工业方案，毛利率 37.7%</td></tr>
+        <tr><td>核心策略</td><td>RaaS + 6.5 万小时运行数据</td><td>Cortex 2.0 + AI5 芯片垂直整合</td><td>供应链自研自产降本</td><td>Walker S 汽车产线交付</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <details class="section" open>
+    <summary>♾️ 无限劳动力经济学</summary>
+    <div class="section-body">
+      <p>William Blair 指出：OECD 老龄化抚养比从 1980 年 19% 升至 31%，2060 年或逼近 50%。制造业回流遭遇「用工荒」，Physical AI 是弥合数字智能与物理执行鸿沟的通用方案。</p>
+      <p><b>ROI 临界点：</b>当前研发期 BoM 约 <span class="accent">$100k</span>，须压至 <span class="accent">$20–30k</span> 才具大规模商业化条件。2030 年代初全生命周期运营成本可降至 <b>$10/小时以下</b>，击穿欧美最低工资。</p>
+      <p><b>数据成本瓶颈：</b>Teleoperation 数据收集从 $340/h 降至 2026 年 $118/h——解释硅谷向 Foundation Model 公司（如 Physical Intelligence π0，估值谈判 <b>$110B</b>）注入数十亿美元的原因：用算法泛化替代昂贵物理数据采集。</p>
+      <p>潜在市场：短期美国 <b>$1.3–1.7T</b> 劳动力替代空间；OSHA/ANSI 2027 安全认证后扩至 <b>$3.8–5.4T</b>；按 $20k/台定价，硬件蓝海近 <b>$2T</b>。</p>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>🇺🇸🇨🇳 中美竞赛：软件大脑 vs 工程量产</summary>
+    <div class="section-body">
+      <p>SVRC 钦定美国「国家冠军队」十家：Figure AI、Agility、Apptronik、Tesla、Boston Dynamics、Physical Intelligence、1X、Amazon Robotics、Covariant、Skild AI——在 Foundation Models、VLA、自动驾驶迁移上占统治地位，但 2025 年合计出货仅约 <b>450 台</b>。</p>
+      <p><b>美国路径：</b>Physical Intelligence 未造硬件，π0 模型两年融资 <b>$1.07B</b>，拟以 $110B 估值再融资 $1B——「机器人 Windows」。1X NEO 定价 $20k 或 $499/月租赁，World Model 140 亿参数，获 EQT 背书，计划 2026–2030 部署 1 万台。</p>
+      <p><b>中国路径：</b>宇树 2025 营收 $2.5B（+335%），净利 $90M，售价从 $85k 砍至 $25k 仍维持 ~60% 毛利率。优必选 Walker S 汽车产线收入 22 倍增长，毛利率跃升 9ppt 至 37.7%。</p>
+      <p><b>Tesla Optimus：</b>Cortex 2.0 于 2026 年 4 月上线 250MW、年中达 500MW（~10 万 GPU）。AI5 芯片 + 22 DoF 灵巧手，目标百万台年产能——但马斯克坦承数百台仍处研发数据收集阶段。</p>
+      <p><b>Agility 赌注：</b>SPAC 估值 $25B，PIPE $2B（富士康领投），总筹资 $620M+，仅 ~100 台活跃商业部署，但手握 $300M+ 意向订单与 6.5 万小时运行数据。</p>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>⛏️ 供应链漏洞一：稀土（<span class="ticker">$UUUU</span> <span class="ticker">$MP</span> <span class="ticker">$USAR</span>）</summary>
+    <div class="section-body">
+      <p>NdFeB 永磁体是 QDD 电机刚需；SmCo 磁体用于高温国防/物流场景（F-35 每架需 ~50 磅）。中国控制 <b>60%+ 开采、90%+ 精炼</b>，重稀土出口管制加剧断供危机。DFARS 2027「无中国供应链」溯源重塑估值。</p>
+      <div class="stock-grid">
+        <div class="stock-card">
+          <h4><span class="ticker">$UUUU</span> Energy Fuels <span class="badge badge-bull">首选</span></h4>
+          <p>美国唯一合规铀处理设施 White Mesa；独居石工艺 NdPr 比例高 30%、Dy/Tb 高 95%。Q1 2026 营运资金 $956M，铀成本 $36/lb，经营性现金流逆转 $8.3M。Q1 氧化铽试验量产；收购 ASM（2026年7月完成）延伸至合金制造；Phase 2 目标 NdPr 年产能 6,229 吨。</p>
+        </div>
+        <div class="stock-card">
+          <h4><span class="ticker">$MP</span> MP Materials <span class="badge badge-neut">大盘配置</span></h4>
+          <p>市值 ~$9.7B；加州 Mountain Pass 唯一本土稀土矿。沃思堡钕铁硼磁体厂直供 GM、苹果。短板：重稀土极少，缺 Sm/Dy 大规模分离能力。</p>
+        </div>
+        <div class="stock-card">
+          <h4><span class="ticker">$USAR</span> USA Rare Earth <span class="badge badge-bear">高弹性</span></h4>
+          <p>Round Top 重稀土矿 + 斯蒂尔沃特水冶示范厂。2026 年遭 Russell 指数剔除、与 MP 商业机密诉讼、换股稀释担忧，Beta 1.89。Q1 净亏 $66M+——押注本土重稀土自给的高风险看涨期权。</p>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>⚙️ 供应链漏洞二：执行器（<span class="ticker">$NOVT</span> <span class="ticker">$RRX</span> <span class="ticker">$ROK</span>）</summary>
+    <div class="section-body">
+      <p>SEA、谐波减速器、伺服电机高端产能 60%+ 集中于日本（Harmonic Drive、Nabtesco）、德国与中国。美国运动控制巨头加速整合以化解「卡脖子」。</p>
+      <div class="stock-grid">
+        <div class="stock-card">
+          <h4><span class="ticker">$NOVT</span> Novanta <span class="badge badge-bull">深度布局</span></h4>
+          <p>Celera Motion 掌握关节底层 Stack：Everest/Denali 伺服驱动（SIL 3）、光学编码器、ZeroCog 无槽无框电机、ATI 六轴力矩传感器。Vector 一体化关节模块缩短初创研发周期。</p>
+        </div>
+        <div class="stock-card">
+          <h4><span class="ticker">$RRX</span> Regal Rexnord <span class="badge badge-bull">一站式</span></h4>
+          <p>Kollmorgen TBM2G 无框伺服电机针对人形受限空间优化；协同 Portescap 微型关节、Thomson 线性执行器、Warner 安全制动，服务 Apptronik / Agility 等。</p>
+        </div>
+        <div class="stock-card">
+          <h4><span class="ticker">$ROK</span> Rockwell Automation <span class="badge badge-neut">系统集成</span></h4>
+          <p>FactoryTalk Orchestration 统筹工厂边缘计算；投资 READY Robotics（ForgeOS 统一 300 万+ 机器人控制）、RightHand Robotics（仓储视觉抓取）；收购 Clearpath/OTTO AMR，密尔沃基投产 OTTO 600/1200。</p>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>🚚 早期部署场景：物流 CapEx 与汽车验证</summary>
+    <div class="section-body">
+      <p><b>物流电商：</b><span class="ticker">$AMZN</span> 已部署 75 万+ 传统机器人，西雅图 BFI4 测试 Agility Digit。<span class="ticker">$FDX</span> CEO 称卡车装卸是最难非结构化问题，测试 Dexterity DexR 双臂装载机与 Berkshire Grey Scoop 自动卸货。<span class="ticker">$GXO</span> 签物流行业首个长期 RaaS 合同，Digit 部署于亚特兰大 SPANX 仓库，接入 Agility Arc 云平台。</p>
+      <p><b>汽车制造：</b>宝马斯巴达堡工厂 Figure 02 两班倒 10 小时连续运转，协助组装 3 万+ X3。奔驰 2026 年 3 月参与 Apptronik $520M A-X 轮，Apollo 用于总装内部物流。福特 2019–2020 与 Agility 测试「最后 50 英尺」配送；GM 仍限定安全隔离测试区，警惕 Physical AI「逻辑幻觉」。</p>
+      <p><b>关键信号：</b>追踪财报电话会中 PoC 测试支出是否转为 RaaS 正式运营开支——GXO 大规模复购或 AMZN 接入第三方人形平台将引爆应用端估值。</p>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>🌊 2027 M&A 浪潮：资金损耗与巨头收割</summary>
+    <div class="section-body">
+      <p>SVRC 预测：六家资金雄厚美国人形公司角逐，<b>2027 年至少 2 起重大洗牌</b>。GPU 集群训练费 + 硬件团队烧钱远超小批量销售现金流——无法量产正向循环者将被吞噬。</p>
+      <p><b>2026 前奏：</b>Intel/Mobileye $900M 收购 Mentee Robotics（LLM 物理操作 + Sim2Real）；Meta $1B 注资 Aria Robotics（49% 股权）；NEURA Robotics $1.4B C 轮（$7B 估值，Nvidia/Amazon/Qualcomm 加持）。</p>
+      <p><b>潜在收购方：</b>拥有数百万仓储需求的 <span class="ticker">$AMZN</span>、需升级产线的底特律三巨头 <span class="ticker">$F</span> <span class="ticker">$GM</span>、科技七雄，或通过 SPAC 间接敞口 <span class="ticker">$CCXI</span>/<span class="ticker">$AGLT</span>。</p>
+      <p>Figure AI、Apptronik 等数百亿美元私有估值宠儿，若无法在量产竞速中追上宇树 $25k/60% 毛利率模型，2027 年出售可能是最现实退路。</p>
+    </div>
+  </details>
+
+  <h3>📈 美股标的分组</h3>
+  <div class="tab-nav" id="ajiStockTabs">
+    <button type="button" class="tab-btn active" data-tab="rare">稀土上游</button>
+    <button type="button" class="tab-btn" data-tab="motion">运动控制</button>
+    <button type="button" class="tab-btn" data-tab="deploy">应用端 / CapEx</button>
+  </div>
+
+  <div class="tab-panel active" data-panel="rare">
+    <div class="stock-grid">
+      <div class="stock-card"><h4><span class="ticker">$UUUU</span> <span class="badge badge-bull">长期配置</span></h4><p>独居石稀土 + 铀副产物处理唯一资质；ASM 收购闭环；Phase 2 NdPr 6,229 吨/年。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$MP</span> <span class="badge badge-neut">主题 Beta</span></h4><p>Mountain Pass 唯一本土矿；沃思堡磁体厂；重稀土结构性短板。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$USAR</span> <span class="badge badge-bear">高波动</span></h4><p>Round Top 重稀土 + 垂直整合愿景；法律/稀释/亏损风险并存。</p></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" data-panel="motion">
+    <div class="stock-grid">
+      <div class="stock-card"><h4><span class="ticker">$NOVT</span> <span class="badge badge-bull">卖铲人</span></h4><p>关节 Stack 全栈 + ATI 力矩传感器 + Vector 模块；无槽电机平滑响应。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$RRX</span> <span class="badge badge-bull">动力总成</span></h4><p>Kollmorgen/Portescap/Thomson 组合；本土定制化供应链。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$ROK</span> <span class="badge badge-neut">工厂级</span></h4><p>编排软件 + VC 卡位 + OTTO AMR 本土产能；系统集成溢价。</p></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" data-panel="deploy">
+    <div class="stock-grid">
+      <div class="stock-card"><h4><span class="ticker">$GXO</span> <span class="badge badge-bull">RaaS 里程碑</span></h4><p>行业首个长期 Digit RaaS 合同；测试 Apptronik Apollo / Reflex。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$AMZN</span> <span class="badge badge-neut">风向标</span></h4><p>75 万+ 传统机器人 + BFI4 Digit 测试；潜在大规模收购方。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$FDX</span> <span class="badge badge-neut">AI-native</span></h4><p>日均 1600 万包裹；DexR 装载 + Scoop 卸货双轨测试。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$CCXI</span> / <span class="ticker">$AGLT</span> <span class="badge badge-neut">SPAC 敞口</span></h4><p>Agility Robotics 上市载体；$25B 估值赌 RaaS 规模化。</p></div>
+      <div class="stock-card"><h4><span class="ticker">$TSLA</span> <span class="badge badge-neut">垂直整合</span></h4><p>Optimus + Cortex 2.0 + AI5；百万台目标 vs 研发期现实。</p></div>
+    </div>
+  </div>
+
+  <h3>🎯 战略结论速览</h3>
+  <ul class="checklist">
+    <li><b>卖铲人 &gt; 大脑泡沫</b> — Physical Intelligence 等 $100B+ 估值依赖算法泛化；<span class="ticker">$NOVT</span>/<span class="ticker">$ROK</span> 从所有量产竞赛中抽佣。</li>
+    <li><b>稀土 = 地缘政治期权</b> — DFARS 2027 倒逼北美闭环；<span class="ticker">$UUUU</span> 独居石 + Dy/Tb 分离执行力最强。</li>
+    <li><b>追踪 CapEx 转化</b> — <span class="ticker">$GXO</span> RaaS 合同是商业模式质变信号；<span class="ticker">$FDX</span>/<span class="ticker">$AMZN</span> 测试规模决定应用端爆发时点。</li>
+    <li><b>2027 整合交易</b> — 关注 Mobileye/Mentee 模式复制；持有潜在收购方或 <span class="ticker">$CCXI</span> 间接参与洗牌。</li>
+  </ul>
+
+  <p class="disclaimer">本平台仅提供投资教育与数据分析，不构成投资建议。美股与相关交易具有极高风险，可能面临本金亏损。文中数据来源于 SVRC Research、William Blair 及公开财报，仅供参考。© OptionsAji · 阿吉生财有道</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  if (typeof Chart === 'undefined') return;
+  var GOLD = '#c9a227', INK = '#151617', BEAR = '#b42318', BULL = '#0d7a5f', MUTED = '#8b8d97';
+
+  var ship = document.getElementById('ajiShipChart');
+  if (ship) {
+    new Chart(ship, {
+      type: 'bar',
+      data: {
+        labels: ['宇树 Unitree', '智元 AgiBot', 'Figure AI', 'Agility', 'Tesla Optimus'],
+        datasets: [{
+          label: '2025 出货量（台）',
+          data: [5500, 5168, 150, 150, 150],
+          backgroundColor: [BEAR, BEAR, BULL, BULL, BULL],
+          borderRadius: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: {
+            type: 'logarithmic',
+            min: 100,
+            ticks: { callback: function (v) { return v.toLocaleString(); } }
+          }
+        }
+      }
+    });
+  }
+
+  var bom = document.getElementById('ajiBomChart');
+  if (bom) {
+    new Chart(bom, {
+      type: 'line',
+      data: {
+        labels: ['2023', '2024', '2025', '2026E', '2028E', '2030E'],
+        datasets: [{
+          label: '单机 BoM（$k）',
+          data: [100, 80, 50, 35, 25, 20],
+          borderColor: GOLD,
+          backgroundColor: 'rgba(201,162,39,.15)',
+          fill: true,
+          tension: 0.35,
+          pointRadius: 5
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: {
+            beginAtZero: false,
+            min: 10,
+            ticks: { callback: function (v) { return '$' + v + 'k'; } }
+          }
+        }
+      }
+    });
+  }
+
+  var nav = document.getElementById('ajiStockTabs');
+  if (nav) {
+    nav.addEventListener('click', function (e) {
+      var btn = e.target.closest('.tab-btn');
+      if (!btn) return;
+      var tab = btn.getAttribute('data-tab');
+      nav.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.toggle('active', b === btn); });
+      document.querySelectorAll('.aji-guide .tab-panel').forEach(function (p) {
+        p.classList.toggle('active', p.getAttribute('data-panel') === tab);
+      });
+    });
+  }
+})();
+</script>
